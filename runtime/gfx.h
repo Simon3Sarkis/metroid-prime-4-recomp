@@ -140,4 +140,5 @@ typedef struct { uint64_t frames, nvn_calls, nvn_distinct, unimplemented, valida
                  draws_skipped; } GfxStats;
 GfxStats gfx_stats(void);
 void rt_frame_presented(const tex_t *t, uint64_t n);       // boot.c: --frames N ends the run after the Nth present
+void rt_shot_ring_dump(void);                              // boot.c: writes the MP4_SHOT_RING frames (F10 in the window)
                                                            // (saves --shot first through read_texels)

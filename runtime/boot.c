@@ -246,6 +246,111 @@ static void save_shot(const tex_t *t, const char *path) {
     rt_logf("boot: shot %s (%ux%u)\n", path, w, h);
 }
 
+// Box-filters w x h RGBA (or BGRA) pixels to ow x oh RGBA with opaque alpha.
+static void box_filter(const uint8_t *px, uint32_t w, uint32_t h, int bgra, uint8_t *out, uint32_t ow, uint32_t oh) {
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t x0 = x * w / ow, x1 = (x + 1) * w / ow, y0 = y * h / oh, y1 = (y + 1) * h / oh;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (y1 <= y0) y1 = y0 + 1;
+            uint32_t sum[4] = {0}, k = 0;
+            for (uint32_t sy = y0; sy < y1; sy++)
+                for (uint32_t sx = x0; sx < x1; sx++, k++)
+                    for (int c = 0; c < 4; c++) sum[c] += px[4ull * (sy * (uint64_t)w + sx) + (uint32_t)c];
+            uint8_t *o = out + 4ull * (y * ow + x);
+            for (int c = 0; c < 4; c++) o[c] = (uint8_t)(sum[bgra && c != 3 ? 2 - c : c] / k);
+            o[3] = 255;
+        }
+}
+
+// MP4_SHOT_RING=<n> [MP4_SHOTS_DIR=dir]: the last n presents are kept in memory at 800x450 and written as
+// <dir>/ring_f<present>.png when F10 is pressed in the window (gfx_window.c, rt_shot_ring_dump) or at present
+// MP4_SHOT_RING_AT=<present>, for glitches that last a frame: press F10 right after one. Reading each present back
+// waits for its frame, which costs frame rate while the ring is on. The PNGs are written on a thread of their own.
+#define RING_W 800
+#define RING_H 450
+static struct { uint8_t *px; uint64_t frame; } *ring;
+static int ring_n, ring_next, ring_full;
+static SRWLOCK ring_lock = SRWLOCK_INIT;
+static void ring_shot(const tex_t *t, uint64_t n) {
+    static int parsed, on;
+    static unsigned long long at;
+    if (!parsed) {
+        const char *e = cfg_get("MP4_SHOT_RING");
+        ring_n = e && *e ? atoi(e) : 0;
+        if (ring_n > 0) {
+            ring = calloc((size_t)ring_n, sizeof *ring);
+            if (!ring) rt_fatal("boot: out of memory for the shot ring");
+            for (int i = 0; i < ring_n; i++)
+                if (!(ring[i].px = malloc(4ull * RING_W * RING_H))) rt_fatal("boot: out of memory for the shot ring");
+            on = 1;
+            const char *a = cfg_get("MP4_SHOT_RING_AT");
+            at = a && *a ? strtoull(a, NULL, 10) : 0;
+            rt_log("boot: shot ring of %d presents at %dx%d; F10 writes it%s", ring_n, RING_W, RING_H, at ? " (and present MP4_SHOT_RING_AT)" : "");
+        }
+        parsed = 1;
+    }
+    if (!on) return;
+    int fmt = t->d.format;
+    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB;
+    if (!bgra && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB) return;
+    uint32_t w = t->d.width, h = t->d.height;
+    static uint8_t *px;
+    static uint64_t px_bytes;
+    if (px_bytes < 4ull * w * h) free(px), px = malloc(px_bytes = 4ull * w * h);
+    if (!px) rt_fatal("boot: out of memory for a shot ring frame");
+    view_t view;
+    memset(&view, 0, sizeof view);
+    NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
+    if (gfx_replay_async()) gfx_backend()->finish();
+    gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
+    flip_rows(px, w, h);
+    AcquireSRWLockExclusive(&ring_lock);
+    box_filter(px, w, h, bgra, ring[ring_next].px, RING_W, RING_H);
+    ring[ring_next].frame = n;
+    if (++ring_next == ring_n) ring_next = 0, ring_full = 1;
+    ReleaseSRWLockExclusive(&ring_lock);
+    if (at && n == at) rt_shot_ring_dump();
+}
+typedef struct { int n; struct { uint8_t *px; uint64_t frame; } *f; char dir[MAX_PATH]; } RingDump;
+static DWORD WINAPI ring_write_main(void *arg) {
+    RingDump *d = arg;
+    for (int i = 0; i < d->n; i++) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof path, "%s/ring_f%05llu.png", d->dir, (unsigned long long)d->f[i].frame);
+        rt_write_png(path, d->f[i].px, RING_W, RING_H);
+        free(d->f[i].px);
+    }
+    rt_log("boot: shot ring: %d presents written to %s", d->n, d->dir);
+    free(d->f), free(d);
+    return 0;
+}
+void rt_shot_ring_dump(void) {
+    if (!ring) return;
+    RingDump *d = calloc(1, sizeof *d);
+    if (!d) return;
+    const char *dir = cfg_get("MP4_SHOTS_DIR") ? cfg_get("MP4_SHOTS_DIR") : ".";
+    snprintf(d->dir, sizeof d->dir, "%s", dir);
+    CreateDirectoryA(d->dir, NULL);
+    AcquireSRWLockExclusive(&ring_lock);
+    int n = ring_full ? ring_n : ring_next, first = ring_full ? ring_next : 0;
+    d->f = calloc((size_t)(n ? n : 1), sizeof *d->f);
+    if (d->f)
+        for (int i = 0; i < n; i++) {   // oldest first; the ring keeps filling while the copies are written
+            int k = (first + i) % ring_n;
+            d->f[i].frame = ring[k].frame;
+            d->f[i].px = malloc(4ull * RING_W * RING_H);
+            if (d->f[i].px) memcpy(d->f[i].px, ring[k].px, 4ull * RING_W * RING_H);
+            else n = i;
+        }
+    d->n = d->f ? n : 0;
+    ReleaseSRWLockExclusive(&ring_lock);
+    rt_log("boot: shot ring: writing %d presents to %s", d->n, d->dir);
+    HANDLE h = CreateThread(NULL, 0, ring_write_main, d, 0, NULL);
+    if (h) CloseHandle(h);
+    else ring_write_main(d);
+}
+
 // MP4_SHOTS=lo-hi:step [MP4_SHOTS_DIR=dir]: every step-th present in [lo, hi] saved as <dir>/f<n>.png (n the
 // present), box-filtered to 480x270; MP4_SHOTS=w<lo>-<hi>:<step> takes them by world-clock seconds instead, the first
 // present at or after each step (full size with MP4_SHOTS_FULL=1), for finding short glitches. Pipeline builds stay asynchronous, so the
@@ -286,19 +391,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
     gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
     flip_rows(px, w, h);
-    for (uint32_t y = 0; y < oh; y++)
-        for (uint32_t x = 0; x < ow; x++) {
-            uint32_t x0 = x * w / ow, x1 = (x + 1) * w / ow, y0 = y * h / oh, y1 = (y + 1) * h / oh;
-            if (x1 <= x0) x1 = x0 + 1;
-            if (y1 <= y0) y1 = y0 + 1;
-            uint32_t sum[4] = {0}, k = 0;
-            for (uint32_t sy = y0; sy < y1; sy++)
-                for (uint32_t sx = x0; sx < x1; sx++, k++)
-                    for (int c = 0; c < 4; c++) sum[c] += px[4ull * (sy * (uint64_t)w + sx) + (uint32_t)c];
-            uint8_t *o = out + 4ull * (y * ow + x);
-            for (int c = 0; c < 4; c++) o[c] = (uint8_t)(sum[bgra && c != 3 ? 2 - c : c] / k);
-            o[3] = 255;
-        }
+    box_filter(px, w, h, bgra, out, ow, oh);
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%s/f%05llu.png", dir, (unsigned long long)n);
     rt_write_png(path, out, ow, oh);
@@ -312,6 +405,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
 void rt_frame_presented(const tex_t *t, uint64_t n) {
     const RtConfig *cfg = rt_config();
     series_shot(t, n);
+    ring_shot(t, n);
     int64_t w = cfg->seconds ? frame_step_world_us() : -1;
     if (w < 0 || (double)w < cfg->seconds * 1e6) return;
     if (cfg->shot) save_shot(t, cfg->shot);

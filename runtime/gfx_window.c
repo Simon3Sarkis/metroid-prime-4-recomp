@@ -387,6 +387,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             cfg_save();
             note_applied();   // what cfg_get reads now (the environment may still override it)
         }
+        if (w == VK_F10 && !(l & (1 << 30))) rt_shot_ring_dump();   // MP4_SHOT_RING: the last presents to PNGs
         break;
     case WM_APP_SETTINGS:
         apply_settings(h);
