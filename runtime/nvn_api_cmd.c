@@ -583,11 +583,22 @@ static void xfb_note(const char *what) {
                 n += (size_t)snprintf(line + n, sizeof line - n, " %x=%x", o, v);
             }
             rt_log("nvn: transform feedback begin: program %p stage %u control (%p):%s", (const void *)p, i, (const void *)ctl, line);
+            if (i == 0) {   // the vertex stage's tail bytes in full, zeros included (a selector list may be mostly zero)
+                char hex[3 * 0x180 + 1];
+                for (int o = 0; o < 0x180; o++) snprintf(hex + 3 * o, 4, "%02x ", ctl[0x700 + o]);
+                rt_log("nvn: transform feedback vertex control 0x700..0x880: %s", hex);
+            }
         }
     }
 }
 // void nvnCommandBufferBindTransformFeedbackBuffer(NVNcommandBuffer *cmd, int index, NVNbufferAddress addr, size_t size)
-NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; xfb_note("BindTransformFeedbackBuffer"); }
+NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) {
+    xfb_note("BindTransformFeedbackBuffer");
+    static volatile LONG said;   // the first bindings: which buffer the captured vertices go to (for finding their readers)
+    if (InterlockedIncrement(&said) <= 8)
+        rt_log("nvn: BindTransformFeedbackBuffer index %d addr %#llx size %#llx", (int)arg_x(c, 1), (unsigned long long)arg_x(c, 2),
+               (unsigned long long)arg_x(c, 3));
+}
 // void nvnCommandBufferBindTransformFeedbackBuffers(NVNcommandBuffer *cmd, int first, int n, const NVNbufferRange *r)
 NVN_API(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; xfb_note("BindTransformFeedbackBuffers"); }
 // void nvnCommandBufferBegin/End/Pause/ResumeTransformFeedback(NVNcommandBuffer *cmd, NVNbufferAddress control)

@@ -178,6 +178,14 @@ the null decoder). No host AAC decoder needed.
   does the same). The earlier attempt at this had been reverted together with the viewport mirroring; a dump with
   `MP4_FRONT_FLIP=1` settled it. With that the first area renders as it should: rocks, Samus's ship, the sky, the
   fire and the energy field, at 59 fps.
+- Morphing into the ball stopped the process in `rt_dispatch`: a switch in `main+0x54e9f0` jumped to a case
+  (`main+0x54ec38`) that the generated code took for an exit, since the generator had cut that function into a
+  dozen fragments. The cause was in function discovery (`gen.py discover`): an ADRP+ADD pair is read as a
+  materialised address even when an instruction between the two rewrites the register (`adrp x8; add x8, x8, #a;
+  ...; ldr x8, [x19, #0x30]; add x0, x8, #0x34`), which made an address in the middle of the function a start,
+  and the branch fixpoint split the rest. Pairs with such a rewrite are dropped now (capstone names the registers
+  an instruction writes): 9,946 of them in `main`, and the discovery fixpoint went from seven rounds to two. Every
+  module was regenerated.
 
 ## Shared core
 

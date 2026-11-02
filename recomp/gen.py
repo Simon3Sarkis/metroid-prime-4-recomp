@@ -1,4 +1,4 @@
-# From fe3h-pc-recomp recomp/gen.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+# From fe3h-pc-recomp recomp/gen.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; an ADRP+ADD pair whose register is rewritten in between is no materialised address.
 # From totk-pc-recomp recomp/gen.py @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 # Adapted from LAS Recomp tools/gen.py @ da35b83 (MIT, Copyright (c) 2026 Peiikai).
 """Generate C for the ExeFS modules: function discovery, then parallel emission into chunked C files.
@@ -34,6 +34,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import capstone
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,7 +138,24 @@ def discover(mod):
         pc = np.where(cand, p, 0)
         cand &= is_adrp[pc] & ((w[pc] & 31).astype(np.int64) == rn)
         found[cand] = p[cand]
+    # The pair is void when an instruction between the ADRP and the ADD writes the register again: `adrp x8, P; add
+    # x8, x8, #a; ...; ldr x8, [x19, #0x30]; add x0, x8, #0x34` materialises P+a and then an unrelated address. One such
+    # pair in MP4 made a function start in the middle of a switch, and the targets of its table left the fragment:
+    # rt_dispatch had no function there (main+0x54ec38). Capstone tells which registers an instruction writes.
     hit = found >= 0
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+    md.detail = True
+    dropped = 0
+    for i in np.flatnonzero(hit & (add - found > 1)):
+        q, a, r = int(found[i]), int(add[i]), int(rn[i])
+        names = {f'x{r}', f'w{r}'}
+        code = w[q + 1:a].astype('<u4').tobytes()
+        for ins in md.disasm(code, 0):
+            _, written = ins.regs_access()
+            if names & {ins.reg_name(x) for x in written}:
+                hit[i] = False
+                dropped += 1
+                break
     p = found[hit]
     page = ((pc0 + p * 4) & ~np.int64(0xFFF)) + (imm21(p) << 12)
     add_bytes = page + ((w[add[hit]] >> 10) & 0xFFF).astype(np.int64)
@@ -148,7 +166,8 @@ def discover(mod):
     bl_tgt = bl_tgt[(bl_tgt >= 0) & (bl_tgt < n)]
     starts = np.unique(np.concatenate([seeds, bl_tgt, mat]))
     stats = {'seeds': int(len(seeds)), 'bl_targets': int(len(np.unique(bl_tgt))),
-             'materialised_targets': int(len(np.unique(mat))), 'initial_starts': int(len(starts))}
+             'materialised_targets': int(len(np.unique(mat))), 'initial_starts': int(len(starts)),
+             'adrp_add_pairs_dropped': dropped}
 
     rounds = 0
     while True:
