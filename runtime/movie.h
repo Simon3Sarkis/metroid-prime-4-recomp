@@ -30,8 +30,8 @@ typedef struct {
 } MovieGuest;
 
 enum { MOVIE_EV_INPUT, MOVIE_EV_OUTPUT, MOVIE_EV_FORMAT, MOVIE_EV_ERROR };   // DecoderEvents: EventType * per event
-enum { MOVIE_TYPE_H264 = 1, MOVIE_TYPE_VP9 = 3, MOVIE_MODE_BUFFER = 1, MOVIE_MODE_TEXTURE = 2, MOVIE_FORMAT_NV12 = 4,
-       MOVIE_FLAG_EOS = 4 };
+enum { MOVIE_TYPE_H264 = 1, MOVIE_TYPE_VP9 = 3, MOVIE_TYPE_AAC = 4, MOVIE_MODE_BUFFER = 1, MOVIE_MODE_TEXTURE = 2,
+       MOVIE_FORMAT_NV12 = 4, MOVIE_FLAG_EOS = 4 };   // type 4: the decoder this game makes for "audio/mp4a-latm"
 
 typedef struct { uint64_t frames, decode_ns, max_ns, errors, dropped, handed; } MovieStats;
 

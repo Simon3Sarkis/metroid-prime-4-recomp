@@ -134,6 +134,14 @@ frames). Three scripted runs through the cinematic pass at 59 fps. `nvnSyncWait`
 out and a poll that fails eight times on the same fence, which ruled out a stuck sync first. On the way the game also
 asked for `nvnTextureBuilderGetSparseTileLayout`, answered with Maxwell's 64 KiB tile sizes by bytes per block.
 
+**The cinematic's audio and picture (2026-11-03):** past the text crawl the cinematic stayed black. Its movie carries
+an AAC track (`audio/mp4a-latm`, decoder type 4 in buffer mode), which the host had taken over as a null decoder;
+the player waits on its audio clock, so the decoded video frames were never drawn (the frame dump showed no draw of
+the movie texture). The library's audio decoders are software (FDK AAC and libopus inside subsdk0, the Android
+codec framework around them) and only the video decoders need the NVIDIA driver, so the audio decoder is left to
+the library and runs lifted: the cinematic plays with picture and sound at 59 fps (`MP4_MOVIE_AUDIO=null` restores
+the null decoder). No host AAC decoder needed.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

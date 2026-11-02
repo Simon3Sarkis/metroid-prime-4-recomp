@@ -557,6 +557,15 @@ static void ov_ctor(Cpu *c) {
         return;
     }
     int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE;
+    // Audio (type 4, "audio/mp4a-latm" in this game's cinematics) is left to the library: its decoders for AAC and
+    // Opus are software (FDK AAC, libopus inside subsdk0) and run lifted; only the video decoders need the NVIDIA
+    // driver. MP4_MOVIE_AUDIO=null takes it over as a null decoder instead (the game then shows no video either: its
+    // player waits on the audio clock).
+    if (type == MOVIE_TYPE_AAC && strcmp(cfg_value("MP4_MOVIE_AUDIO"), "null")) {
+        rt_log("movie: audio decoder type %d mode %d format %d left to the library", type, mode, format);
+        pass(c, MOVIE_CTOR);
+        return;
+    }
     int unsupported = !h264 && (type != MOVIE_TYPE_VP9 || mode != MOVIE_MODE_BUFFER);
     // The library's decoder would run lifted into the NVIDIA driver (NvRm), which the host does not serve. VP9 in
     // buffer mode (TotK) and H.264 in texture mode (this game: the decoder writes into the game's own NVN textures)
