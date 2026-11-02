@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; shader image stores are recorded as GPU writes by slot id; textures in a shadowed virtual pool are mirrored from its shadow storage.
 // From totk-pc-recomp runtime/vk_texture.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only; sampler slots span several pools (FE3H).
 // Vulkan textures of the graphics layer: a VkImage cache keyed by storage
 // GPU address plus descriptor, uploads through staging buffers with block-linear deswizzle and ASTC decode (vk_astc.c),
@@ -169,6 +169,8 @@ static int tex_mirrored(const tex_t *t) {
     if (!t->mem || nvn_gpu_only((uintptr_t)t->mem)) return 0;
     if (t->has_layout) return 1;
     const pool_t *p = t->pool;
+    // a virtual pool with shadow storage (nvn_api_core.c shadow_pool): the mappings copied the CPU-written texels there
+    if (p && (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && p->host) return 1;
     if (!p || !(p->flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))) return 0;
     if (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_ADAPTIVE_ZCULL |
                       NVN_TEXTURE_FLAGS_DEPTH16_PREFER_FAST_CLEAR | NVN_TEXTURE_FLAGS_ZCULL_SUPPORT_STENCIL))
@@ -312,8 +314,10 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     int ds = f.depth || f.stencil;
     if (ds && (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (!ds && (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if ((d->flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == 1)
-        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    // Storage usage for every format that supports it, not only textures made with NVN_TEXTURE_FLAGS_IMAGE: this game
+    // binds its volumetric fog volume (RGBA16F 3D, in a CPU-visible pool) as a storage image of a vertex shader
+    // without that flag, and a view without the usage left the stores on a dummy image (get_view).
+    if ((ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == 1) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = ds ? 0 : VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;   // format-reinterpreting views
     // Cube compatible only for cube targets: the replay makes cube views of nothing else (vk_exec_draw.c get_view checks
     // the image's own view type). The flag on every square array of 6+ layers changed how AMD's Windows driver lays such
@@ -908,27 +912,43 @@ static void wb_cfg_init(void) {
     if (wb_limit != WB_SMALL_DEFAULT) rt_log("vk: fence write-back limit %llu bytes", (unsigned long long)wb_limit);
 }
 
+static void written_locked(Tex *e) {
+    make_fresh(e);   // a partial render keeps what the storage held before
+    e->pub.gpu_owned = 1;
+    uint64_t f = vk_exec_recording_fence();
+    if (f > e->wr_fence) e->wr_fence = f;
+    if (e->pub.mirrored) {
+        e->gpu_dirty = 1;
+        storage_rewritten(e, 0, &e->gpu_gen);   // CPU writes up to here are older than this render
+        e->gpu_seq = ++gpu_writes;
+        e->gpu_fence = vk_exec_recording_fence();
+        wb_cfg_init();
+        if (e->t.L.size <= wb_limit) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);
+        own_add(e);
+    }
+}
+
 void vk_texture_gpu_written(const tex_t *t) {
     if (!t || !t->mem) return;
     vk_exec_frame_written(t);
     lock();
     Tex *e = entry_of(t);
-    if (e) {
-        make_fresh(e);   // a partial render keeps what the storage held before
-        e->pub.gpu_owned = 1;
-        uint64_t f = vk_exec_recording_fence();
-        if (f > e->wr_fence) e->wr_fence = f;
-        if (e->pub.mirrored) {
-            e->gpu_dirty = 1;
-            storage_rewritten(e, 0, &e->gpu_gen);   // CPU writes up to here are older than this render
-            e->gpu_seq = ++gpu_writes;
-            e->gpu_fence = vk_exec_recording_fence();
-            wb_cfg_init();
-            if (e->t.L.size <= wb_limit) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);
-            own_add(e);
-        }
-    }
+    if (e) written_locked(e);
     unlock();
+}
+
+// A shader of the draw or dispatch being recorded stores into the image of texture slot id (a storage image binding
+// with Ryujinx's image-store usage flag). The same bookkeeping as a render into it: this game writes its volumetric
+// fog volume from a vertex shader into a texture in CPU-visible pool memory, which was re-uploaded from its untouched
+// storage before the fog pass read it.
+void vk_texture_gpu_written_id(int id) {
+    lock();
+    const VkTexImage *img = vk_texture_by_id_locked(id, NULL, NULL);
+    Tex *e = img ? tslots[id].ce : NULL;
+    const tex_t *t = e ? &e->t : NULL;
+    if (e) written_locked(e);
+    unlock();
+    if (t) vk_exec_frame_written(t);
 }
 
 void vk_texture_release(const tex_t *t) {

@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/nvn_tex.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/nvn_tex.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; sparse textures get the block layout of their 64 KiB tiles.
 // From totk-pc-recomp runtime/nvn_tex.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // NVN texture storage size / alignment / per-level offsets (Tegra X1 block-linear layout).
 // Ported from MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/nvn_tex.c @ b75be8cf; Apple parts dropped, layout math unchanged.
@@ -28,7 +28,9 @@
 //   one GOB = 64 bytes × 8 rows = 512 bytes; the block height (tileH, in GOBs) is picked by 'height×1.5'; levels are accumulated with block alignment.
 // The game's packaged textures (SetPackagedTextureLayout) carry 8 bytes of layout parameters: byte 0 = log2 of the block height (derived by comparing 16 cases from the real game,
 // 4 of which differ from the automatic algorithm); when present it takes precedence.
+#include <stdio.h>
 #include "cfg.h"
+#include "host.h"
 #include "nvn_tex.h"
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -128,6 +130,20 @@ static uint64_t layer_bytes(const nvn_texdesc *d, unsigned dpl, int layered,
     return ls;
 }
 
+/* A sparse texture (NVN_TEXTURE_FLAGS_SPARSE) is laid out so that a row of eight blocks is one 64 KiB tile, the unit
+   its pages are mapped in (nvn_api_obj.c sparse_layout gives the game the tile sizes). The block height (and depth,
+   for 3D) follow from the tile shape per bytes per block: 2D tiles 256x256 (1 byte), 256x128 (2), 128x128 (4),
+   128x64 (8), 64x64 (16) blocks; 3D tiles 64x64x16 (1), 64x32x16 (2), 32x32x16 (4), 64x16x16 (8), 32x8x16 (16).
+   MP4_SPARSE_TILES=<log2 GOBs>,<log2 depth> overrides, for finding the hardware's choice from the game's data. */
+static void sparse_tiles(int bpb, unsigned dpl, unsigned *tileH, unsigned *tileD) {
+    static const unsigned h2[5] = {5, 4, 4, 3, 3}, h3[5] = {3, 2, 2, 1, 0};
+    int k = bpb <= 1 ? 0 : bpb <= 2 ? 1 : bpb <= 4 ? 2 : bpb <= 8 ? 3 : 4;
+    unsigned th = dpl == 3 ? h3[k] : h2[k], td = dpl == 3 ? 4 : 0;
+    const char *e = cfg_get("MP4_SPARSE_TILES");
+    if (e && *e) { unsigned a = 0, b = 0; if (sscanf(e, "%u,%u", &a, &b) >= 1) th = a, td = dpl == 3 ? b : 0; }
+    *tileH = th; *tileD = td;
+}
+
 void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     fmt_t t = fmt_of(d->format);
     unsigned dpl; int layered; uint32_t w, h, z;
@@ -159,6 +175,16 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     if ((d->flags & 0x200) && !d->pkg_block_h && minimal_layout_on()) {
         uint64_t minimal = layer_bytes(d, dpl, layered, w, h, z, 0, 0, t);
         if (minimal != ls) { tileH = tileD = 0; ls = minimal; }
+    }
+    if ((d->flags & 0x20) && !d->pkg_block_h && dpl >= 2) {   // SPARSE: the block is one 64 KiB tile's worth (sparse_tiles)
+        sparse_tiles(t.bpb, dpl, &tileH, &tileD);
+        ls = layer_bytes(d, dpl, layered, w, h, z, tileH, tileD, t);
+    }
+    if (d->flags & 0x20) {
+        static int said;
+        if (said++ < 8)
+            rt_log("nvn: sparse texture %ux%ux%u format %#x target %d levels %u: packaged layout %#x, block height 2^%u GOBs, depth 2^%u, %llu bytes",
+                   d->width, d->height, d->depth, d->format, d->target, d->levels, d->pkg_block_h, tileH, tileD, (unsigned long long)ls);
     }
     o->tileH = tileH; o->tileD = tileD;
     o->layer_size = ls;

@@ -48,11 +48,17 @@ static class SwshXlate
         public int QueryTextureArrayLengthFromPool() => 32;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;
+        // 槽号 | the host's c2 slot of a handle (gfx_shader.c handle_slot): combined texture+sampler handles at bytes
+        // 0x20..0x120 (this game's layout, 32 slots of 8 bytes), image handles at 0x120..0x168, separate textures at
+        // TexBase..SampBase; the "tex" and "img" tables are keyed by that slot.
         int TexSlot(int handle, int cbufSlot)
         {
             (int off0, _, _) = TextureHandle.UnpackOffsets(handle);
             int bytes = off0 * 4;
-            return (cbufSlot < 0 || (cbufSlot & 0xffff) == 2) && bytes >= TexBase && bytes < SampBase && (bytes - TexBase) % 8 == 0 ? (bytes - TexBase) / 8 : -1;
+            if (!(cbufSlot < 0 || (cbufSlot & 0xffff) == 2) || bytes % 8 != 0) return -1;
+            if (bytes >= 0x20 && bytes < 0x120) return (bytes - 0x20) / 8;
+            if (bytes >= 0x120 && bytes < TexBase) return (bytes - 0x120) / 8;
+            return bytes >= TexBase && bytes < SampBase ? (bytes - TexBase) / 8 : -1;
         }
         public SamplerType QuerySamplerType(int handle, int cbufSlot = -1)
         {
@@ -61,6 +67,7 @@ static class SwshXlate
             string t = slot >= 0 ? Get("tex", slot) ?? Get("img", slot) : null;
             if (t == null) { Notes.Add($"贴图句柄 {handle:X}（常量段 {cbufSlot}，槽 {slot}）无 PC 类型，按 2D"); return SamplerType.Texture2D; }
             if (t.EndsWith("_depth")) t = t.Substring(0, t.Length - 6);   // depth-format texture: same sampler type here; the host binds a depth view
+            if (t.EndsWith("_uint") || t.EndsWith("_sint")) t = t.Substring(0, t.Length - 5);   // integer texture (QuerySamplerFormat)
             return t switch
             {
                 "1d" => SamplerType.Texture1D, "1darray" => SamplerType.Texture1D | SamplerType.Array,
@@ -69,6 +76,16 @@ static class SwshXlate
                 "3d" => SamplerType.Texture3D, "cube" => SamplerType.TextureCube, "cubearray" => SamplerType.TextureCube | SamplerType.Array,
                 _ => SamplerType.Texture2D,
             };
+        }
+        // 整数纹理 | integer textures: the host suffixes the slot's type with _uint or _sint (gfx_shader.c tex_type flags);
+        // the translator then declares an integer sampled image and bitcasts the texels (patch 0010).
+        public TextureFormat QuerySamplerFormat(int handle, int cbufSlot = -1)
+        {
+            int slot = TexSlot(handle, cbufSlot);
+            if (slot >= 0) TexQueried.Add(slot);
+            string t = slot >= 0 ? Get("tex", slot) : null;
+            if (t == null) return TextureFormat.Unknown;
+            return t.EndsWith("_uint") ? TextureFormat.R32Uint : t.EndsWith("_sint") ? TextureFormat.R32Sint : TextureFormat.Unknown;
         }
         public TextureFormat QueryTextureFormat(int handle, int cbufSlot = -1)
         {

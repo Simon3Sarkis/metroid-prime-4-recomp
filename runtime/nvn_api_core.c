@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/nvn_api_core.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the window origin mode is kept as a global (nvn_origin_lower_left) for the back end; this game keeps NVN's lower-left default.
+// From fe3h-pc-recomp runtime/nvn_api_core.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the window origin mode is kept as a global (nvn_origin_lower_left) for the back end; this game keeps NVN's lower-left default; a virtual pool mapped from CPU-visible pool memory gets shadow storage the mappings copy into.
 // From totk-pc-recomp runtime/nvn_api_core.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; the depth mode defaults to NVN's NEAR_IS_MINUS_W.
 // NVN front end, first slice: device, queue, memory pool, buffer, sync and
 // event objects. Ported from MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c @ b75be8cf (MIT,
@@ -10,6 +10,7 @@
 // AAPCS64 registers (host.h arg_x / arg_p) and every result returned with ret_x.
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -162,6 +163,16 @@ static int pool_place(pool_t *o) {
         }
         rt_log("nvn: CPU-visible physical pool %p (flags %#x, size %#llx) keeps the game's storage", (void *)o->mem,
                o->flags, (unsigned long long)o->size);
+        return 1;
+    }
+    if (virt) {   // shadow storage from the start: this game maps CPU-visible memory into its virtual pools (below)
+        uint64_t a = mem_shadow_reserve(o->size);
+        if (!a) {
+            rt_log("nvn: no shadow storage for a virtual pool of %#llx bytes", (unsigned long long)o->size);
+            return 0;
+        }
+        o->mem = o->host = (uint8_t *)(uintptr_t)a;
+        o->span = o->size;
         return 1;
     }
     uint64_t a = gva_alloc(o->size);
@@ -319,6 +330,7 @@ NVN_API(nvnMemoryPoolFinalize) {
     if (pool_gpu_visible(o)) index_del(o);
     gfx_backend()->pool_fini(o);
     if (nvn_gpu_only((uintptr_t)o->mem)) gva_free((uintptr_t)o->mem);
+    if (o->host) mem_shadow_release((uintptr_t)o->host), o->host = NULL;
     o->mem = o->game_mem;
     o->span = 0;
     o->magic = 0;
@@ -356,6 +368,34 @@ NVN_API(nvnMemoryPoolMap) {
     if (o->magic != NVN_POOL_MAGIC || (o->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) { ret_x(c, 0); return; }
     ret_x(c, (uintptr_t)o->mem);
 }
+// Mapping from CPU-visible pool memory (this game: its streamed light and fog volumes, BC6H and BC1 3D textures
+// in virtual pools, come from a CPU_CACHED pool the game fills from its paks). On hardware the mapping aliases the
+// pages; here every virtual pool has shadow storage of its own from its creation (pool_place: mem_shadow_reserve,
+// watched and below the address limit, since the game builds its textures before it maps their pages), each mapping
+// copies the pages into it, and textures over it are uploaded from it with the tiled layout conversion like any
+// CPU-written texture (vk_texture.c tex_mirrored). The copy is made at the mapping; pages the game rewrites
+// afterwards without mapping them again are not seen. A mapping from a PHYSICAL pool (TotK's kind, CPU-invisible)
+// has no bytes to copy and is not supported with shadow storage.
+static int shadow_source(const pool_t *p) {
+    return !(p->flags & (NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_VIRTUAL | NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) &&
+           p->mem && !nvn_gpu_only((uintptr_t)p->mem);
+}
+static void shadow_map(pool_t *v, const nvn_mapping_t *r) {
+    uint64_t dst = (uintptr_t)v->mem + (uint64_t)r->virtual_offset;
+    if (!mem_shadow_commit(dst, r->size)) rt_fatal("nvn: cannot commit %#llx bytes of virtual pool shadow", (unsigned long long)r->size);
+    const pool_t *p = (const pool_t *)(const void *)r->physical_pool;
+    if (p) memcpy((void *)(uintptr_t)dst, p->mem + r->physical_offset, (size_t)r->size);
+    else memset((void *)(uintptr_t)dst, 0, (size_t)r->size);
+    nvn_guest_written(dst, r->size);
+    const char *dir = cfg_get("MP4_DUMP_VPOOL");   // raw mapped pages, for checking the tiled layout offline
+    if (dir && *dir && p) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/vpool_%llx_%llx.bin", dir, (unsigned long long)(uintptr_t)v->mem,
+                 (unsigned long long)r->virtual_offset);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite((const void *)(uintptr_t)dst, 1, (size_t)r->size, f); fclose(f); }
+    }
+}
 // MacNativeGames totk_vpool.c: every request is checked before any mapping changes.
 static int check_request(const pool_t *v, const nvn_mapping_t *r, int i) {
     uint64_t end = (uint64_t)r->virtual_offset + r->size;
@@ -375,8 +415,9 @@ static int check_request(const pool_t *v, const nvn_mapping_t *r, int i) {
     }
     if (!r->physical_pool) return 1;   // unmap
     const pool_t *p = (const pool_t *)(const void *)r->physical_pool;
-    if (p->magic != NVN_POOL_MAGIC || !(p->flags & NVN_MEMORY_POOL_FLAGS_PHYSICAL)) {
-        rt_log("nvn: MapVirtual request %d source %p is not a physical pool", i, (const void *)p);
+    if (p->magic != NVN_POOL_MAGIC || (!(p->flags & NVN_MEMORY_POOL_FLAGS_PHYSICAL) && !shadow_source(p))) {
+        rt_log("nvn: MapVirtual request %d source %p is not a physical pool (magic %#x, flags %#x, size %#llx)", i,
+               (const void *)p, p->magic, p->flags, (unsigned long long)p->size);
         return 0;
     }
     uint64_t pend = (uint64_t)r->physical_offset + r->size;
@@ -401,9 +442,16 @@ NVN_API(nvnMemoryPoolMapVirtual) {
     if (n < 0 || (n && !r)) { rt_log("nvn: MapVirtual with %d requests at %p", n, (const void *)r); ret_x(c, 0); return; }
     for (int i = 0; i < n; i++)
         if (!check_request(v, &r[i], i)) { ret_x(c, 0); return; }
-    if (!gfx_backend()->pool_map_virtual(v, n, r))
-        rt_fatal("nvn: MapVirtual of %d requests failed after validation; virtual pool %p is inconsistent", n, (void *)v);
-    NVN_LOG("MapVirtual pool %p, %d requests", (void *)v->mem, n);
+    int nshadow = 0;
+    for (int i = 0; i < n; i++) {
+        const pool_t *src = (const pool_t *)(const void *)r[i].physical_pool;
+        if (!src || shadow_source(src)) { shadow_map(v, &r[i]); nshadow++; continue; }
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 3)
+            rt_log("nvn: MapVirtual: a physical pool mapped into a virtual pool, which has shadow storage here: not supported, "
+                   "the pages stay zero");
+    }
+    NVN_LOG("MapVirtual pool %p, %d requests (%d shadowed)", (void *)v->mem, n, nshadow);
     ret_x(c, 1);
 }
 // NVNbufferAddress nvnMemoryPoolGetBufferAddress(const NVNmemoryPool *p)

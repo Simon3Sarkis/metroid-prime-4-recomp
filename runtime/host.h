@@ -158,6 +158,10 @@ void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen r
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
                                                            // regions frozen now; freezes and thaws since the last call
 void mem_kernel_free(void *p, uint64_t size);              // TLR/TLS reuse after thread exit
+uint64_t mem_shadow_reserve(uint64_t size);               // watched storage below the address limit for a virtual pool
+                                                           // mapped from CPU-visible pool memory; 0 when none fits
+int mem_shadow_commit(uint64_t addr, uint64_t size);       // commits pages of it (zeroed)
+void mem_shadow_release(uint64_t addr);                    // releases a reservation
 
 // ---- modules (loader.c)
 typedef struct {

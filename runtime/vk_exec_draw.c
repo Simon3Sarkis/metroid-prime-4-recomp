@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the viewport orientation follows the window origin mode.
+// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the viewport orientation follows the window origin mode; storage images a shader stores into are recorded as GPU writes; texture type answers carry the integer class of the format.
 // From totk-pc-recomp runtime/vk_exec_draw.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; separable programs: BindProgram with a subset of stages (FE3H); bound handles become pool slots (FE3H uses several descriptor pools).
 // Draws, binds and dispatches of the Vulkan op-stream replay: the strong
 // vk_exec_op_draw behind vk_exec.c's weak hook. The bind ops fill the VkExec slots; a draw opens the pass, resolves the
@@ -26,6 +26,7 @@
 #include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "tex.h"
 #include "nvn_hmap.h"
 #include "vk.h"
 #include "vk_exec.h"
@@ -472,7 +473,13 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     VkImageViewType vt = res_view_type(rtype);
     int ms = (rtype & 0x200) != 0;
     if ((img->samples > 1) != ms || (storage && ms)) return VK_NULL_HANDLE;
-    if (storage && !(img->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return VK_NULL_HANDLE;
+    if (storage && !(img->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 6)
+            rt_log("vk_exec: storage binding of image %#llx (%ux%ux%u fmt %d) made without STORAGE usage: a dummy is bound",
+                   (unsigned long long)img->addr, img->width, img->height, img->depth, (int)img->format);
+        return VK_NULL_HANDLE;
+    }
     int cube = vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
     int ok = 0;
     switch (vt) {
@@ -664,11 +671,46 @@ static void slot_mask_learn(uint64_t serial, int st, const GfxShader *s) {
     slotm[slotm_idx(serial, st)] = (typeof(slotm[0])){serial, st, gfx_shader_slot_mask(s)};
 }
 
+// The numeric class of a Vulkan format: GFX_TEX_UINT, GFX_TEX_SINT or 0 (float, normalised, depth, compressed).
+static uint8_t format_class(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_A8B8G8R8_UINT_PACK32: case VK_FORMAT_A2R10G10B10_UINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16_UINT:
+    case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32_UINT:
+    case VK_FORMAT_R32G32B32A32_UINT:
+        return GFX_TEX_UINT;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8_SINT: case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_B8G8R8A8_SINT: case VK_FORMAT_A8B8G8R8_SINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_SINT_PACK32: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16_SINT:
+    case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT:
+    case VK_FORMAT_R32G32B32A32_SINT:
+        return GFX_TEX_SINT;
+    default: return 0;
+    }
+}
+
+// The slot's texture type for the translator: its dimensionality (GFX_TEX_*) and, for an integer format, the class flag
+// (GFX_TEX_UINT / GFX_TEX_SINT): the translator declares integer samplers for those (this game samples its R32UI light
+// list; a float sampler of an integer image is invalid in Vulkan and read it wrong).
 static uint8_t type_of_handle(uint64_t h) {   // texture lock held
     view_t v;
     int hv;
     const VkTexImage *img = h ? vk_texture_by_id_locked((int)(h & 0xfffff), &v, &hv) : NULL;
-    return img ? (uint8_t)gfx_type_of(img, &v, hv) : 0;
+    if (!img) return 0;
+    VkFormat f = img->format;
+    if (hv && v.set_format) {
+        TexVkFormat vf;
+        if (tex_vk_format(v.format, &vf) && vf.vk != VK_FORMAT_UNDEFINED) f = vf.vk;
+    }
+    uint8_t cls = format_class(f);
+    if (cls) {
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 5)
+            rt_log("vk_exec: texture slot %d (%ux%u vk format %d) answered as an integer texture (%s)", (int)(h & 0xfffff), img->width,
+                   img->height, (int)f, cls == GFX_TEX_UINT ? "uint" : "sint");
+    }
+    return (uint8_t)(gfx_type_of(img, &v, hv) | cls);
 }
 
 // The answers of stage st for the slots in mask; the types of other slots stay zero.
@@ -717,6 +759,14 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     GfxShaderAnswers a;
     uint64_t serial = ex->prog->serial;
     answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
+    for (int i = 0; i < 32; i++)
+        if (a.tex_type[i] & (GFX_TEX_UINT | GFX_TEX_SINT)) {
+            static volatile LONG said;
+            if (InterlockedIncrement(&said) <= 5)
+                rt_log("vk_exec: stage %d slot %d answered type %#x (mask %#x) for program %llu", st, i, a.tex_type[i],
+                       slot_mask_of(serial, st), (unsigned long long)serial);
+            break;
+        }
     ShaderEnt *set = NULL;
     if (serial) {
         uint64_t h = (serial * 0x9E3779B97F4A7C15ull ^ (uint64_t)st) ^ nvn_hm_hash(&a, sizeof a);   // a is zero-padded
@@ -1663,6 +1713,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     bind_stats(info);
     int gfx = info->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
     int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = B.res_valid;
+    int stored[32], nstored = 0;   // slot ids of storage images the shaders store into (marked written below)
     if (skip) {
         same = bind_sig(ex, info);
         if (same && was_valid && skip == 1) {
@@ -1732,6 +1783,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                     else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
                     tex_info(ex, r, h, img, r->separate, &o[k].image);
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
+                    // an image the shader stores into: marked written after the lock is released (below)
+                    if (img && (r->flags & 4) && h && nstored < (int)(sizeof stored / sizeof stored[0]))
+                        stored[nstored++] = (int)(h & 0xfffff);
                 }
                 vk_texture_unlock();
             }
@@ -1747,6 +1801,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
         nd += cnt;
     }
+    // Storage images the shaders store into: a render into them for the texture bookkeeping (vk_texture_gpu_written_id),
+    // so a mirrored one is not uploaded from its storage over the stores and its storage gets the result back.
+    for (int k = 0; k < nstored; k++) vk_texture_gpu_written_id(stored[k]);
     // Under the validation layer, a new graphics layout binds set 1 before set 0 is pushed or bound. The layer (SDK
     // 1.4.363, PipelineLayoutCompatDef::operator==) takes any two INDEPENDENT_SETS layouts as compatible, so
     // vkCmdPushDescriptorSetKHR keeps the push set it made for an earlier layout and drops writes to bindings that
@@ -2143,6 +2200,8 @@ static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType
 static void op_draw(VkExec *ex, const p_draw *d) {
     c0_binst = (uint32_t)d->base_instance;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
+    if (vk_dump_armed) rt_log("dump: draw prim %d first %d count %d instances %d base %d", d->prim, d->first, d->count,
+                              d->instances, d->base_instance);
     vk_exec_frame.draws++;
     uint32_t inst = d->instances > 0 ? (uint32_t)d->instances : 1, first = (uint32_t)d->first, n = (uint32_t)d->count;
     if (d->prim == NVN_DRAW_PRIMITIVE_QUADS && n >= 4) {   // quads become two triangles each

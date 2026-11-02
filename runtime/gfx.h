@@ -29,7 +29,9 @@ int gfx_window_focused(void);
 // ---- shader service client (gfx_shader.c)
 enum { GFX_STAGE_VS, GFX_STAGE_TCS, GFX_STAGE_TES, GFX_STAGE_GS, GFX_STAGE_FS, GFX_STAGE_CS };
 enum { GFX_TEX_1D = 1, GFX_TEX_1D_ARRAY, GFX_TEX_BUFFER, GFX_TEX_2D, GFX_TEX_2D_ARRAY, GFX_TEX_2D_MS,
-       GFX_TEX_2D_MS_ARRAY, GFX_TEX_3D, GFX_TEX_CUBE, GFX_TEX_CUBE_ARRAY };   // gfx_shader.c tex_names order
+       GFX_TEX_2D_MS_ARRAY, GFX_TEX_3D, GFX_TEX_CUBE, GFX_TEX_CUBE_ARRAY,   // gfx_shader.c tex_names order (low 4 bits)
+       GFX_TEX_UINT = 0x10, GFX_TEX_SINT = 0x20 };   // tex_type flags: the texture's format is integer (the translator
+                                                     // then declares an integer sampler, patch 0010)
 enum { GFX_TYPE_FLOAT, GFX_TYPE_SINT, GFX_TYPE_UINT };
 typedef struct {                                           // the translator's answers (Program.cs Accessor)
     uint8_t tex_type[32], img_type[32], img_format[32];    // per c2 slot; 0 = not asked; types are GFX_TEX_*,

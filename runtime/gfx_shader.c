@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/gfx_shader.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/gfx_shader.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; integer textures are answered with _uint / _sint suffixes.
 // From totk-pc-recomp runtime/gfx_shader.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Shader service client: turns an NVN program (control section, code, c1 constants and the
 // translator's answers) into SPIR-V plus reflection through `mp4_xlate.exe --serve` children, started lazily with
@@ -57,7 +57,7 @@
 #define IN_VERSION 1                                       // in every input id and .in file: bump when the answers layout
                                                            // or the program hash changes (drops every stored input)
 #define USE_MAGIC 0x4d554b54u                              // "TKUM", .use files
-#define USE_VERSION 1
+#define USE_VERSION 2                                      // 2: slots include the sampler format query (integer textures)
 #define IN_MAGIC 0x49534b54u                               // "TKSI", .in files
 #define MAX_SVC 32                                         // translator processes
 
@@ -1059,7 +1059,14 @@ static size_t build_request(char *o0, const char *hex, const char *stage, const 
         const char *sep = "";
         o += sprintf(o, ",\"tex\":{");
         for (int i = 0; i < 32; i++)
-            if (a->tex_type[i] && a->tex_type[i] < COUNT(tex_names)) o += sprintf(o, "%s\"%d\":\"%s\"", sep, i, tex_names[a->tex_type[i]]), sep = ",";
+            if ((a->tex_type[i] & 0xf) && (a->tex_type[i] & 0xf) < COUNT(tex_names)) {
+                o += sprintf(o, "%s\"%d\":\"%s%s\"", sep, i, tex_names[a->tex_type[i] & 0xf],
+                             a->tex_type[i] & GFX_TEX_UINT ? "_uint" : a->tex_type[i] & GFX_TEX_SINT ? "_sint" : ""), sep = ",";
+                if (a->tex_type[i] & (GFX_TEX_UINT | GFX_TEX_SINT)) {
+                    static volatile LONG said;
+                    if (InterlockedIncrement(&said) <= 5) rt_log("gfx_shader: request with an integer texture at slot %d (%s)", i, stage);
+                }
+            }
         sep = "";
         o += sprintf(o, "},\"img\":{");
         for (int i = 0; i < 32; i++)

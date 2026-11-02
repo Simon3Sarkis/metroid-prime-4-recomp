@@ -659,7 +659,14 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) 
     for (uint64_t a = lo & ~((1ull << REG_SHIFT) - 1); a < hi && frozen; a += 1ull << REG_SHIFT) frozen = mem_frozen(a);
     while (!frozen) {
         uint64_t n = ww_query(lo, hi - lo);
-        if (n == UINT64_MAX) { tracked = 0; break; }
+        if (n == UINT64_MAX) {
+            static volatile LONG said;
+            if (InterlockedIncrement(&said) <= 5)
+                rt_log("vk: pages %#llx+%#llx are not write-watched: the storage over them is read as changed", (unsigned long long)lo,
+                       (unsigned long long)(hi - lo));
+            tracked = 0;
+            break;
+        }
         for (uint64_t k = 0; k < n; k++) stamp_page(gen_pages[k], g);
         if (n < sizeof gen_pages / sizeof *gen_pages) break;   // a full answer may have left pages for the next call
     }

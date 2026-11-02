@@ -142,6 +142,38 @@ codec framework around them) and only the video decoders need the NVIDIA driver,
 the library and runs lifted: the cinematic plays with picture and sound at 59 fps (`MP4_MOVIE_AUDIO=null` restores
 the null decoder). No host AAC decoder needed.
 
+**Into the first area (2026-11-03):** the save loads into gameplay with the HUD over a black world. In order:
+
+- The first gameplay frames use transform feedback (`nvnCommandBufferBindTransformFeedbackBuffer` and the begin,
+  end, pause, resume and draw entries). They are accepted and dropped for now; a replay needs
+  `VK_EXT_transform_feedback` and the streamout layout of the vertex program, which the control section does not
+  visibly hold. The vertex shaders of that pass read attributes only, so their push descriptor set had no bytes and
+  `vkCmdPushDescriptorSetWithTemplateKHR` got a NULL pointer, which faulted inside the NVIDIA driver; found with the
+  Khronos validation layer (`MP4_VK_VALIDATION=1`, installed on this machine).
+- The world was black because the volumetric fog composite multiplied the scene by an empty fog volume. The volume
+  (RGBA16F 76x44x64) is written by a points draw under rasterizer discard whose vertex shader stores into it as a
+  storage image. Two things kept it empty: the texture was made without `NVN_TEXTURE_FLAGS_IMAGE`, so the host had
+  given its image no storage usage and bound a dummy (storage usage now follows format support); and the replay never
+  recorded shader image stores as GPU writes, so the mirrored texture was re-uploaded from its untouched storage
+  (`vk_texture_gpu_written_id`, from the draw's and dispatch's storage image bindings).
+- The game's streamed light and fog volumes (one BC6H and five BC1 3D textures of 384x192x528) are sparse textures
+  in virtual pools mapped page by page from a CPU_CACHED pool the game fills from its paks; TotK maps only physical
+  pools, which the host backs with device memory. A virtual pool now has shadow storage of its own from its creation
+  (`mem_shadow_reserve`: watched host memory below the address limit, since the game builds its textures before it
+  maps their pages), each mapping copies the pages into it, and textures over it are mirrored from it. A sparse
+  texture is laid out so that eight blocks make a 64 KiB tile (`nvn_tex.c sparse_tiles`); the BC1 volumes' block
+  height (2 GOBs) and depth (16) were confirmed by decoding the dumped pages under every candidate and scoring the
+  smoothness of neighbouring blocks (`MP4_DUMP_VPOOL` writes them). Mappings from physical pools into a shadowed pool
+  are not supported.
+- The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
+  host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
+  separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).
+  Translator patch 0010 declares an integer sampled image when the host says the texture is integer
+  (`QuerySamplerFormat`, answered as `_uint` / `_sint` suffixes) and bitcasts the texels; the use masks were bumped
+  (`USE_VERSION 2`) so the keys relearn which slots matter. With that the tone-mapped scene shows the room lit, with
+  the fire's glow. Still wrong: flat magenta polygons and cyan streaks where the sky is, which the bloom chain smears
+  into giant blobs over the picture.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

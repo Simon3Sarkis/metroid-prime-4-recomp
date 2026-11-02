@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; SetHeapSize refuses a size it cannot grant with OutOfMemory.
+// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; SetHeapSize refuses a size it cannot grant with OutOfMemory; shadow reservations for virtual pools mapped from CPU-visible pools.
 // From totk-pc-recomp runtime/memory.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; MapMemory also takes stacks from module data (FE3H).
 // Adapted from MacNativeGames games/totk/runtime/services.c and loader.c @ b75be8c (MIT, Copyright (c) 2026
 // MacNativeGames contributors), and LAS Recomp runtime/main.c and platform/windows.c @ da35b83 (MIT, Copyright (c)
@@ -51,6 +51,9 @@ enum { ATTR_PERMISSION_LOCKED = 16 };
 
 static RtGuestLayout L;
 static uint64_t mods_lo, mods_hi;   // fixed module window
+static uint64_t shadow_next, shadow_end;   // virtual pool shadow reservations (mem_shadow_reserve): next candidate, limit
+static uint64_t shadow_lo[64], shadow_hi[64];   // the reservations made, for watched()
+static int nshadow;
 static SRWLOCK lock = SRWLOCK_INIT;
 static uint64_t heap_size, alias_bytes;
 static uint8_t *alias_pages;        // 1 per mapped 4 KiB page of the alias region
@@ -88,8 +91,12 @@ static volatile LONG64 frz_count[4];   // freezes; thaws by a write fault, by me
 
 static int watched(uint64_t addr, uint64_t size) {
     const RtGuestLayout *g = &L;
-    return (addr >= g->aslr.base && size <= LOW_SIZE && addr - g->aslr.base <= LOW_SIZE - size) ||
-           (addr >= g->alias.base && size <= ALIAS_SIZE && addr - g->alias.base <= ALIAS_SIZE - size);
+    if ((addr >= g->aslr.base && size <= LOW_SIZE && addr - g->aslr.base <= LOW_SIZE - size) ||
+        (addr >= g->alias.base && size <= ALIAS_SIZE && addr - g->alias.base <= ALIAS_SIZE - size))
+        return 1;
+    for (int i = 0; i < nshadow; i++)   // virtual pool shadows (mem_shadow_reserve)
+        if (addr >= shadow_lo[i] && addr + size <= shadow_hi[i] && addr + size >= addr) return 1;
+    return 0;
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
@@ -274,6 +281,7 @@ void mem_init(void) {
     for (uint64_t at = align_up(low + LOW_SIZE, ALIAS_ALIGN); at + ALIAS_SIZE <= mods_lo && !alias; at += ALIAS_ALIGN)
         if (reserve_at(at, ALIAS_SIZE, MEM_WRITE_WATCH)) alias = at;
     if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");
+    shadow_next = align_up(alias + ALIAS_SIZE, GiB), shadow_end = mods_lo;
 
     AddVectoredExceptionHandler(1, thaw_handler);   // before the crash handler
     alias_pages = VirtualAlloc(NULL, ALIAS_PAGES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -295,6 +303,27 @@ void mem_init(void) {
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
+
+// Shadow storage of a virtual pool mapped from CPU-visible pool memory (nvn_api_core.c): a watched reservation below
+// the address limit between the alias region and the module window, so textures over it are uploaded from it like
+// any CPU-written storage and the pages the mapping copies are tracked. The whole pool is committed at once (zero
+// pages cost nothing until touched): a texture upload reads its whole storage, mapped or not.
+uint64_t mem_shadow_reserve(uint64_t size) {
+    size = align_up(size, 0x10000);
+    for (uint64_t at = shadow_next; at + size <= shadow_end; at += GiB)
+        if (reserve_at(at, size, MEM_WRITE_WATCH)) {
+            shadow_next = align_up(at + size, GiB);
+            if (!VirtualAlloc((void *)(uintptr_t)at, size, MEM_COMMIT, PAGE_READWRITE))
+                rt_fatal("memory: cannot commit %#llx bytes of virtual pool shadow", (unsigned long long)size);
+            if (nshadow < 64) shadow_lo[nshadow] = at, shadow_hi[nshadow] = at + size, nshadow++;
+            return at;
+        }
+    return 0;
+}
+int mem_shadow_commit(uint64_t addr, uint64_t size) {
+    return VirtualAlloc((void *)(uintptr_t)addr, size, MEM_COMMIT, PAGE_READWRITE) != NULL;
+}
+void mem_shadow_release(uint64_t addr) { VirtualFree((void *)(uintptr_t)addr, 0, MEM_RELEASE); }
 
 // Adapted from LAS Recomp runtime/platform/windows.c:40-63 @ da35b83 (MIT, Copyright (c) 2026 Peiikai): GetWriteWatch
 // with the reset flag. A range inside one watched reservation (stack and heap block, or alias region) only.
