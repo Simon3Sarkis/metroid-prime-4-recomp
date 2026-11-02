@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_pipeline.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_pipeline.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the front face is mirrored for the lower-left window origin.
 // From totk-pc-recomp runtime/vk_pipeline.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Graphics and compute pipelines and descriptor layouts of the Vulkan replay. The op-stream replay (vk_exec.c)
 // collects NVN state into a VkPipeState and asks for the pipeline of each draw; this file maps that state to Vulkan,
@@ -2958,10 +2958,14 @@ void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) {
     if (!ensure_init()) return;
     const poly_st *pl = &s->poly;
     const ds_st *d = &s->ds;
-    // The front face maps unchanged: TOTK sets the upper-left window origin, and the y-flipped viewport (y_flip) puts
-    // NDC +y at row 0 as NVN does, so the framebuffer winding Vulkan tests is the one NVN tests (MacNativeGames passes
-    // it to Metal unchanged; LAS Recomp exec.c mirrors it only for the lower-left origin).
-    int front_cw = pl->front == NVN_FRONT_FACE_CW;
+    // Upper-left window origin (TotK): the front face maps unchanged, since the y-flipped viewport puts NDC +y at
+    // row 0 as NVN does and the framebuffer winding Vulkan tests is the one NVN tests. Lower-left origin (NVN's
+    // default, this game): NVN measures the winding in a y-up window space and the replay keeps Vulkan's viewport
+    // orientation, so the front face is mirrored (LAS Recomp exec.c does the same); without it this game's culled
+    // meshes showed their back faces and lost their fronts. MP4_FRONT_FLIP=1 mirrors it once more, for checking.
+    static int flip = -1;
+    if (flip < 0) flip = cfg_bool("MP4_FRONT_FLIP");
+    int front_cw = ((pl->front == NVN_FRONT_FACE_CW) != nvn_origin_lower_left()) != flip;
     vkCmdSetCullMode(cb, (VkCullModeFlags)(pl->cull & 3));   // NVN_FACE_* has VkCullModeFlagBits' values
     vkCmdSetFrontFace(cb, front_cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
     vkCmdSetPrimitiveTopology(cb, vk_pipeline_topology(s->prim));

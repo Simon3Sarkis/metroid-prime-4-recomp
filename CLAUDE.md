@@ -61,7 +61,10 @@ venv too (`.venv-win`, made from `tools/requirements.txt`), as the Linux side ha
 The game boots to its title screen, menus, save and opening cinematic (text crawl, H.264 movies through openh264);
 the window origin is NVN's lower-left default (render targets bottom-up, flipped at present), and the window acquire
 bounds how far the CPU runs ahead of the GPU (`MP4_GPU_AHEAD`), which the game's timer-query pool needs. The
-cinematic's AAC audio is decoded by the lifted library (its audio codecs are software). Next: the first gameplay area. Test runs: `build/input/newgame.txt`
+cinematic's AAC audio is decoded by the lifted library (its audio codecs are software). The first area renders
+(front face mirrored for the lower-left origin, shadow-backed virtual pools for the streamed light volumes, integer
+samplers, shader image stores tracked). Next: transform feedback (stubbed; the control sections logged with
+`MP4_XFB_LOG=1`), the black arm cannon, then further areas. Test runs: `build/input/newgame.txt`
 with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
 `runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
 `runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.

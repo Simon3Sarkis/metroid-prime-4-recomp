@@ -171,8 +171,13 @@ the null decoder). No host AAC decoder needed.
   Translator patch 0010 declares an integer sampled image when the host says the texture is integer
   (`QuerySamplerFormat`, answered as `_uint` / `_sint` suffixes) and bitcasts the texels; the use masks were bumped
   (`USE_VERSION 2`) so the keys relearn which slots matter. With that the tone-mapped scene shows the room lit, with
-  the fire's glow. Still wrong: flat magenta polygons and cyan streaks where the sky is, which the bloom chain smears
-  into giant blobs over the picture.
+  the fire's glow.
+- The magenta polygons and cyan streaks in the sky, and the meshes that showed their back faces and lost their
+  fronts, were the face winding: under the lower-left origin NVN measures it in a y-up window space while the
+  replay keeps Vulkan's orientation, so the front face has to be mirrored (`vk_pipeline_set_dynamic`; LAS Recomp
+  does the same). The earlier attempt at this had been reverted together with the viewport mirroring; a dump with
+  `MP4_FRONT_FLIP=1` settled it. With that the first area renders as it should: rocks, Samus's ship, the sky, the
+  fire and the energy field, at 59 fps.
 
 ## Shared core
 

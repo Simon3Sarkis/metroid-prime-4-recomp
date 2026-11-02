@@ -21,6 +21,8 @@
 #include <string.h>
 
 #include "gfx.h"
+#include <stdio.h>
+#include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -559,10 +561,30 @@ NVN_API(nvnCommandBufferSetRasterizerDiscard) { REC(cmd_of(c), OP_RASTER_DISCARD
 // begin/end/pause/resume calls are accepted and dropped, and DrawTransformFeedback draws nothing, so the draws that
 // would read the captured vertices read nothing. A full replay needs VK_EXT_transform_feedback and the streamout
 // layout of the vertex program's control section. Each entry is logged once.
+static _Thread_local const prog_t *xfb_last_prog;   // the program this thread bound last (BindProgram), for the log below
 static void xfb_note(const char *what) {
     static volatile LONG said[8];
     int k = what[0] == 'B' && what[1] == 'i' ? 0 : what[0] == 'B' ? 1 : what[0] == 'E' ? 2 : what[0] == 'P' ? 3 : what[0] == 'R' ? 4 : 5;
     if (InterlockedIncrement(&said[k]) == 1) rt_log("nvn: transform feedback is not replayed: %s dropped", what);
+    // MP4_XFB_LOG=1: the control sections of the program bound at a Begin, the nonzero dwords outside the usual fields,
+    // for finding where GLSLC keeps the streamout layout (the first three begins).
+    static volatile LONG begins;
+    if (k == 1 && cfg_bool("MP4_XFB_LOG") && InterlockedIncrement(&begins) <= 3 && xfb_last_prog) {
+        const prog_t *p = xfb_last_prog;
+        for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
+            const uint8_t *ctl = p->sd[i].control;
+            if (!ctl) continue;
+            char line[1600] = "";
+            size_t n = 0;
+            for (int o = 0; o < 0x880 && n < sizeof line - 40; o += 4) {
+                uint32_t v;
+                memcpy(&v, ctl + o, 4);
+                if (!v || (o >= 0x7d0 && o < 0x7e8) || o == 0x700 || o == 0x704 || o == 0x708 || o == 0x790 || o == 0x7c8 || o == 0x7e8) continue;
+                n += (size_t)snprintf(line + n, sizeof line - n, " %x=%x", o, v);
+            }
+            rt_log("nvn: transform feedback begin: program %p stage %u control (%p):%s", (const void *)p, i, (const void *)ctl, line);
+        }
+    }
 }
 // void nvnCommandBufferBindTransformFeedbackBuffer(NVNcommandBuffer *cmd, int index, NVNbufferAddress addr, size_t size)
 NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; xfb_note("BindTransformFeedbackBuffer"); }
@@ -593,6 +615,7 @@ NVN_API(nvnCommandBufferSetRenderEnableConditional) {
 }
 // void nvnCommandBufferBindProgram(NVNcommandBuffer *cmd, const NVNprogram *program, int stages)
 NVN_API(nvnCommandBufferBindProgram) {
+    xfb_last_prog = arg_p(c, 1);
     *REC(cmd_of(c), OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){arg_p(c, 1), (int)arg_x(c, 2)};
 }
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
