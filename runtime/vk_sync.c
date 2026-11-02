@@ -18,6 +18,7 @@
 #include <windows.h>
 
 #include "gfx.h"
+#include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "vk.h"
@@ -342,6 +343,38 @@ void vk_sync_exclusive(int on) {
     else ReleaseSRWLockExclusive(&sub_lock);
 }
 
+// MP4_GPU_DELAY=1 (an experiment): a submission is not handed to the queue at once but held until the CPU waits for a
+// fence at or past it (nvnSyncWait, the window acquire, the present) or until vk_sync_finish; the next submission flushes
+// the held ones first, so queue order holds. The console's GPU runs behind the CPU by about a frame, and a game that
+// finishes writing a buffer after submitting the draw that reads it gets away with it there; here the GPU starts at
+// once. Held submissions are visible to nothing but the queue: issued, the completion thread and the fences see them
+// as submitted, so a wait for one flushes it.
+static SRWLOCK pend_lock = SRWLOCK_INIT;
+static struct { VkCommandBufferSubmitInfo cbi[2]; VkSemaphoreSubmitInfo sig; VkSubmitInfo2 si; uint64_t fence; } pend[64];
+static int npend, gpu_delay = -1;
+static void pend_flush_upto(uint64_t value) {   // pend_lock held
+    int k = 0;
+    while (k < npend && pend[k].fence <= value) k++;
+    if (!k) return;
+    VkCtx *c = vk_ctx();
+    vk_queue_lock();
+    for (int i = 0; i < k; i++) {
+        pend[i].si.pCommandBufferInfos = pend[i].si.pCommandBufferInfos == pend[i].cbi ? pend[i].cbi : pend[i].cbi + 1;
+        pend[i].si.pSignalSemaphoreInfos = &pend[i].sig;
+        VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &pend[i].si, VK_NULL_HANDLE);
+        if (r != VK_SUCCESS) vk_device_fault_report(r), rt_fatal("vk: vkQueueSubmit2 of held value %llu failed (%d)", (unsigned long long)pend[i].fence, (int)r);
+    }
+    vk_queue_unlock();
+    memmove(pend, pend + k, (size_t)(npend - k) * sizeof *pend);
+    npend -= k;
+}
+static void pend_flush(uint64_t value) {
+    if (gpu_delay <= 0) return;
+    AcquireSRWLockExclusive(&pend_lock);
+    pend_flush_upto(value);
+    ReleaseSRWLockExclusive(&pend_lock);
+}
+
 uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_sync_start();
     VkCtx *c = vk_ctx();
@@ -381,12 +414,30 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
                         .commandBufferInfoCount = (pro ? 1u : 0u) + (recorded ? 1u : 0u),
                         .pCommandBufferInfos = pro ? cbi : cbi + 1, .signalSemaphoreInfoCount = 1,
                         .pSignalSemaphoreInfos = &sig};
-    vk_queue_lock();
-    VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
-    vk_queue_unlock();
-    if (r != VK_SUCCESS) {
-        vk_device_fault_report(r);
-        rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);
+    if (gpu_delay < 0) {
+        const char *e = cfg_get("MP4_GPU_DELAY");
+        gpu_delay = e && *e && *e != '0';
+        if (gpu_delay) rt_log("vk: submissions are held until a wait needs them (MP4_GPU_DELAY)");
+    }
+    if (gpu_delay > 0) {
+        AcquireSRWLockExclusive(&pend_lock);
+        if (npend == 64) pend_flush_upto(pend[0].fence);
+        typeof(pend[0]) *e = &pend[npend++];
+        memcpy(e->cbi, cbi, sizeof e->cbi);
+        e->sig = sig;
+        e->si = si;
+        e->si.pCommandBufferInfos = pro ? e->cbi : e->cbi + 1;
+        e->si.pSignalSemaphoreInfos = &e->sig;
+        e->fence = fence;
+        ReleaseSRWLockExclusive(&pend_lock);
+    } else {
+        vk_queue_lock();
+        VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+        vk_queue_unlock();
+        if (r != VK_SUCCESS) {
+            vk_device_fault_report(r);
+            rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);
+        }
     }
     s->fence = recorded ? fence : 0;
     vk_mem_note_submit(fence);
@@ -432,6 +483,7 @@ int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns) {
 
 static int fence_wait_impl(uint64_t value, uint64_t timeout_ns) {
     vk_sync_start();
+    pend_flush(value);   // MP4_GPU_DELAY: the held submissions this wait needs
     AcquireSRWLockExclusive(&st_lock);
     int ok;
     if (value > issued && value > reserved) {
@@ -460,6 +512,7 @@ uint64_t vk_sync_issued(void) { return __atomic_load_n(&issued, __ATOMIC_ACQUIRE
 
 void vk_sync_finish(void) {
     vk_sync_start();
+    pend_flush(UINT64_MAX);
     vk_sync_fence_wait(__atomic_load_n(&issued, __ATOMIC_ACQUIRE), UINT64_MAX);
     vk_upload_flush(1);
 }

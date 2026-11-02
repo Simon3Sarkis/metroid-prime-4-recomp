@@ -909,7 +909,12 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             memcpy(ex->blend_color, ((const p_blend_color *)a)->rgba, sizeof ex->blend_color);
             ex->dirty |= VK_EXEC_DIRTY_BLEND_CONST;
             break;
-        case OP_DEPTH_CLAMP: ex->pipe.depth_clamp = ((const p_flag *)a)->value != 0; break;
+        case OP_DEPTH_CLAMP: {   // MP4_DEPTH_CLAMP=0|1 overrides the game's SetDepthClamp (an experiment: clipping at the eye plane)
+            static int force = -2;
+            if (force == -2) { const char *e = cfg_get("MP4_DEPTH_CLAMP"); force = e && *e ? (*e != '0') : -1; }
+            ex->pipe.depth_clamp = force >= 0 ? force : ((const p_flag *)a)->value != 0;
+            break;
+        }
         case OP_RASTER_DISCARD: ex->pipe.raster_discard = ((const p_flag *)a)->value != 0; break;
         case OP_PRIM_RESTART: ex->prim_restart = *(const p_prim_restart *)a; break;
         case OP_COPY_STRIDE: ex->copy_stride = ((const p_copy_stride *)a)->stride; break;

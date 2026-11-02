@@ -1587,6 +1587,9 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
     si.maxLod = d->lod_max > 1000 ? VK_LOD_CLAMP_NONE : d->lod_max;
     if (mf <= NVN_MIN_FILTER_LINEAR) si.maxLod = si.minLod + 0.25f;   // not mipmapped: stay on the base level
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
+    static int lod_cap = -2;   // MP4_LOD_MAX=<n> (an experiment): no sampler goes past mip level n
+    if (lod_cap == -2) { const char *e = cfg_get("MP4_LOD_MAX"); lod_cap = e && *e ? atoi(e) : -1; }
+    if (lod_cap >= 0 && si.maxLod > (float)lod_cap) si.maxLod = (float)lod_cap, si.minLod = si.minLod > si.maxLod ? si.maxLod : si.minLod;
     float lim = c->props.limits.maxSamplerLodBias;
     si.mipLodBias = fmaxf(-lim, fminf(lim, d->lod_bias));
     if (d->aniso > 1) {

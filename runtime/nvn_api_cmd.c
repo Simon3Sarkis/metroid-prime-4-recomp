@@ -631,7 +631,39 @@ NVN_API(nvnCommandBufferSetRenderEnableConditional) {
     r->addr = arg_x(c, 2);
 }
 // void nvnCommandBufferBindProgram(NVNcommandBuffer *cmd, const NVNprogram *program, int stages)
+// MP4_TRACE_DRAW_PROG=<serial>[@<from>-<to>]: the game's call sites of the first draws made under that program (its
+// serial as the pass log prints it), for finding the code that fills the draw's buffers; serial 0 traces every
+// program, once per (program, call site), within presents from..to.
+static _Thread_local const prog_t *bound_prog;
+static void draw_trace(Cpu *c, const char *what) {
+    static int64_t want = -2;
+    static unsigned long long from, to = ~0ull;
+    static volatile LONG said;
+    if (want == -2) {
+        const char *e = cfg_get("MP4_TRACE_DRAW_PROG");
+        char *q = NULL;
+        want = e && *e ? (int64_t)strtoull(e, &q, 10) : -1;
+        if (q && *q == '@') from = strtoull(q + 1, &q, 10), to = *q == '-' ? strtoull(q + 1, NULL, 10) : ~0ull;
+    }
+    if (want < 0 || !bound_prog) return;
+    uint64_t frame = gfx_stats().frames;
+    if (frame < from || frame > to) return;
+    if (want && (int64_t)bound_prog->serial != want) return;
+    uint64_t lr = c->x[30] - 4, serial = bound_prog->serial;
+    if (!want) {   // once per (program, call site)
+        static uint64_t seen[512][2];
+        static int nseen;
+        for (int i = 0; i < nseen; i++)
+            if (seen[i][0] == serial && seen[i][1] == lr) return;
+        if (nseen < 512) seen[nseen][0] = serial, seen[nseen++][1] = lr;
+        else return;
+    } else if (InterlockedIncrement(&said) > 6) return;
+    char buf[128];
+    rt_log("nvn: %s under program %llu from %s at frame %llu", what, (unsigned long long)serial, ldr_describe(lr, buf, sizeof buf),
+           (unsigned long long)frame);
+}
 NVN_API(nvnCommandBufferBindProgram) {
+    bound_prog = arg_p(c, 1);
     *REC(cmd_of(c), OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){arg_p(c, 1), (int)arg_x(c, 2)};
 }
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
@@ -778,6 +810,7 @@ NVN_API(nvnCommandBufferSetPolygonOffsetClamp) {
 }
 // void nvnCommandBufferDrawArrays(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, int first, int count)
 NVN_API(nvnCommandBufferDrawArrays) {
+    draw_trace(c, "DrawArrays");
     *REC(cmd_of(c), OP_DRAW, p_draw) = (p_draw){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), 0, 1};
 }
 // void nvnCommandBufferDrawArraysInstanced(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, int first, int count,
@@ -790,6 +823,7 @@ NVN_API(nvnCommandBufferDrawArraysInstanced) {
 // void nvnCommandBufferDrawElements(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNindexType type, int count,
 // NVNbufferAddress indices)
 NVN_API(nvnCommandBufferDrawElements) {
+    draw_trace(c, "DrawElements");
     cmd_t *o = cmd_of(c);
     *REC(o, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), 0, 0, 1, arg_x(c, 4)};
     hw_fix(o, 48);
@@ -804,6 +838,7 @@ NVN_API(nvnCommandBufferDrawElementsBaseVertex) {
 // void nvnCommandBufferDrawElementsInstanced(..., NVNbufferAddress indices, int base_vertex, int base_instance,
 // int instances): assumed to use the 6-parameter draw macro of the base-vertex form (unverified)
 NVN_API(nvnCommandBufferDrawElementsInstanced) {
+    draw_trace(c, "DrawElementsInstanced");
     cmd_t *o = cmd_of(c);
     *REC(o, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3),
                                                     (int)arg_x(c, 5), (int)arg_x(c, 6), (int)arg_x(c, 7), arg_x(c, 4)};

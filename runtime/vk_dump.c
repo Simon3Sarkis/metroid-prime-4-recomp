@@ -20,7 +20,7 @@
 // as x/2+1/2, UNORM and sRGB bytes written as stored. Caps: MAX_PASSES passes copied, PNG_CAP bytes of PNGs.
 // MP4_DUMP_TEX=<id>|<w>x<h>[,...]: those texture slots, or 2D textures of that size, are copied where first sampled,
 // whatever their format.
-// MP4_DUMP_UBO=1: each listed pipeline also prints the first 16 vec4 of its user uniform blocks (c3 and up), read from
+// MP4_DUMP_UBO=1: each listed pipeline also prints the first 40 vec4 of its user uniform blocks (c3 and up) and the compiler constant bank c1, read from
 // guest memory when the entry is listed. A block the submission rewrites with UpdateUniformBuffer shows its value from
 // before the submission (vk_exec_draw.c upd_note).
 // MP4_DUMP_SKIP_RUNS=1: a render pass with the same targets as the render pass before it is logged but not copied
@@ -52,6 +52,9 @@ static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
 static int skip_runs, dump_ubo;        // MP4_DUMP_SKIP_RUNS, MP4_DUMP_UBO
 static int arm_on_xfb;                 // MP4_DUMP=xfb: the dump frame is the one whose replay meets the first transform feedback begin
+static int arm_on_call;                // MP4_DUMP=when: the dump frame is set by vk_dump_arm (boot.c ring_shot, MP4_DUMP_WHEN)
+static int draws_pass = -1, in_draw_copy;   // MP4_DUMP_DRAWS=<pass>: colour target 0 copied after every draw of that pass
+static int dump_vb;                    // MP4_DUMP_VB=1: the vertex streams of every draw of the dump frame, as guest memory holds them
 static uint32_t want_tex[16][2];       // MP4_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -572,6 +575,25 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             sp(b, "\n");
             continue;
         }
+        if (r && bd->kind == GFX_RES_UBO && dump_ubo && r->slot == 1 && ex->prog) {   // the compiler's constant bank
+            int st = nvn_stage(bd->stage);
+            const uint8_t *ctl, *code;
+            uint32_t len = 0, c1 = 0;
+            if (vk_exec_find_stage(ex->prog, st, &ctl, &code, &len)) memcpy(&c1, ctl + 0x700, 4);
+            if (st == 0 && ctl) {   // the control section's vertex attribute table (dword 0x7f8 count, bytes from 0x804)
+                sp(b, "    vs control 0x7f0..0x810:");
+                for (int k = 0x7f0; k < 0x810; k++) sp(b, " %02x", ctl[k]);
+                sp(b, "\n");
+            }
+            sp(b, "    %s c1 (compiler constants): %u bytes", stn[st], c1 < len ? len - c1 : 0);
+            if (c1 < len) {
+                const float *f = (const float *)(code + c1);
+                for (uint32_t k = 0; k < 4 && (k + 1) * 16 <= len - c1; k++)
+                    sp(b, "%s[%u] %g %g %g %g", k % 4 ? " " : "\n      ", k, f[4 * k], f[4 * k + 1], f[4 * k + 2], f[4 * k + 3]);
+            }
+            sp(b, "\n");
+            continue;
+        }
         if (r && bd->kind == GFX_RES_UBO && dump_ubo && r->slot >= 3 && r->slot - 3 < 18) {
             int st = nvn_stage(bd->stage);
             const p_bind_buf *u = &ex->ubo[st][r->slot - 3];
@@ -580,7 +602,7 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             if (u->addr && vk_mem_resolve(u->addr, 1, &ms)) {
                 uint64_t n = u->size && u->size < ms.avail ? u->size : ms.avail;
                 const float *f = (const float *)(uintptr_t)u->addr;
-                for (uint64_t k = 0; k < 16 && (k + 1) * 16 <= n; k++)
+                for (uint64_t k = 0; k < 40 && (k + 1) * 16 <= n; k++)
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
             } else {
@@ -682,21 +704,72 @@ static void state_line(Str *b, const VkExec *ex, const VkPipeState *s) {
         sp(b, "; viewport %g,%g %gx%g z %g..%g", ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3], ex->vp[0][4],
            ex->vp[0][5]);
     if (ex->has_scissor) sp(b, "; scissor %d,%d %dx%d", ex->scissor.x, ex->scissor.y, ex->scissor.w, ex->scissor.h);
-    sp(b, "; depth range %g..%g\n", ex->depth_range[0], ex->depth_range[1]);
+    sp(b, "; depth range %g..%g", ex->depth_range[0], ex->depth_range[1]);
+    for (int t = 0; t < 2; t++)   // the first two targets' blend functions (NVN_BLEND_FUNC_* and NVN_BLEND_EQUATION_*)
+        if (s->color.blend_en >> t & 1)
+            sp(b, "; blend%d rgb %u*src %s %u*dst, a %u*src %s %u*dst", t, (unsigned)s->blend[t].src_rgb,
+               s->blend[t].eq_rgb == 0 ? "+" : s->blend[t].eq_rgb == 1 ? "-" : s->blend[t].eq_rgb == 2 ? "r-" : s->blend[t].eq_rgb == 3 ? "min" : "max",
+               (unsigned)s->blend[t].dst_rgb, (unsigned)s->blend[t].src_a,
+               s->blend[t].eq_a == 0 ? "+" : s->blend[t].eq_a == 1 ? "-" : s->blend[t].eq_a == 2 ? "r-" : s->blend[t].eq_a == 3 ? "min" : "max",
+               (unsigned)s->blend[t].dst_a);
+    if (s->color.logic_op) sp(b, "; logic op %u", (unsigned)s->color.logic_op);
+    sp(b, "\n");
     for (int i = 0; i < 16; i++) {
         va_st a;
         memcpy(&a, &s->vattr[i], sizeof a);
         if (!s->vattr[i]) continue;
-        sp(b, "    vattr %d: fmt %#x offset %u stream %u (stride %u divisor %u) vbuf %#llx+%llu\n", i, (unsigned)a.fmt,
+        sp(b, "    vattr %d: fmt %#x offset %u stream %u (stride %u divisor %u) vbuf %#llx+%llu", i, (unsigned)a.fmt,
            (unsigned)a.offset, (unsigned)a.stream, s->vstream[a.stream].stride, s->vstream[a.stream].divisor,
            (unsigned long long)ex->vbuf[a.stream].address, (unsigned long long)ex->vbuf[a.stream].size);
+        // the first floats of the attribute as guest memory holds them now (what the CPU wrote; the GPU copy may differ)
+        uint64_t at = ex->vbuf[a.stream].address + a.offset;
+        if (at && ex->vbuf[a.stream].size >= a.offset + 16 && at < RT_ADDRESS_LIMIT) {
+            float f[4];
+            memcpy(f, (const void *)(uintptr_t)at, sizeof f);
+            sp(b, " data %g %g %g %g", f[0], f[1], f[2], f[3]);
+        }
+        sp(b, "\n");
     }
+}
+
+// MP4_DUMP_VB=1: the first 64 KiB of each vertex stream a draw of the dump frame binds, from guest memory, as
+// vb_p<pass>_d<draw>_s<stream>.bin (the pass log's vattr lines give the formats, offsets and strides).
+static void dump_vertex_streams(const VkExec *ex, const VkPipeState *s) {
+    if (!dump_vb || frame_now() != dump_frame) return;
+    uint32_t streams = 0;
+    for (int i = 0; i < 16; i++) {
+        va_st a;
+        memcpy(&a, &s->vattr[i], sizeof a);
+        if (s->vattr[i]) streams |= 1u << a.stream;
+    }
+    for (int st = 0; st < 16; st++) {
+        if (!(streams >> st & 1) || !ex->vbuf[st].address || ex->vbuf[st].address >= RT_ADDRESS_LIMIT) continue;
+        uint64_t n = ex->vbuf[st].size < 65536 ? ex->vbuf[st].size : 65536;
+        char path[600];
+        snprintf(path, sizeof path, "%s/vb_p%04d_d%03d_s%d.bin", dir, seq, pass_draws - 1, st);
+        FILE *f = fopen(path, "wb");
+        if (!f) continue;
+        fwrite((const void *)(uintptr_t)ex->vbuf[st].address, 1, (size_t)n, f);
+        fclose(f);
+    }
+}
+
+// Every draw of the dump frame, in order, as "draw <n> of pass <p>: ..." lines ahead of the pass's summary (the
+// pipe entries aggregate draws; MP4_DUMP_VB and MP4_DUMP_DRAWS name draws by this n).
+void vk_dump_draw_params(VkExec *ex, int indexed, int prim, int first, int count, int instances, int base_instance, int base_vertex) {
+    (void)ex;
+    AcquireSRWLockExclusive(&rec_lock);
+    if (active() && frame_now() == dump_frame)
+        fprintf(passes_f, "  draw %d of pass %d: %s prim %d first %d count %d instances %d base instance %d base vertex %d\n", pass_draws - 1,
+                seq, indexed ? "indexed" : "arrays", prim, first, count, instances, base_instance, base_vertex);
+    ReleaseSRWLockExclusive(&rec_lock);
 }
 
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info) {
     AcquireSRWLockExclusive(&rec_lock);
     if (!active()) goto out;
     pass_draws++;
+    dump_vertex_streams(ex, s);
     uint64_t th = bindings_hash(ex, info);
     for (int i = 0; i < nents; i++)
         if (ents[i].p == p && ents[i].th == th) {
@@ -708,9 +781,10 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
         goto out;
     }
     Str b = {0};
-    sp(&b, "vs %016llx fs %016llx prog %llu prim %d%s\n", (unsigned long long)shader_hash(s->vs),
-       (unsigned long long)shader_hash(s->fs), (unsigned long long)(ex->prog ? ex->prog->serial : 0), s->prim,
-       ex->xfb_active ? " xfb" : "");
+    sp(&b, "vs %016llx fs %016llx prog %llu (vs of %llu, fs of %llu, bind stages %#x) prim %d%s\n", (unsigned long long)shader_hash(s->vs),
+       (unsigned long long)shader_hash(s->fs), (unsigned long long)(ex->prog ? ex->prog->serial : 0),
+       (unsigned long long)(ex->stage_prog[0] ? ex->stage_prog[0]->serial : 0), (unsigned long long)(ex->stage_prog[1] ? ex->stage_prog[1]->serial : 0),
+       (unsigned)ex->prog_stages, s->prim, ex->xfb_active ? " xfb" : "");
     state_line(&b, ex, s);
     describe_bindings(&b, ex, info);
     ents[nents++] = (Ent){p, th, 1, b.s};
@@ -760,7 +834,32 @@ static void pass_decide(int same_targets) {
     if (!pass_skip) copied++;
 }
 
+// MP4_DUMP_DRAWS=<pass>: after each draw of that pass of the dump frame, the pass is closed, colour target 0 copied
+// as pass_<pass>_draw_<n>.png and the pass opened again (its attachments load), for finding the draw behind a pixel.
+void vk_dump_after_draw(VkExec *ex) {
+    if (in_draw_copy || draws_pass < 0) return;
+    AcquireSRWLockExclusive(&rec_lock);
+    int go = active() && frame_now() == dump_frame && seq == draws_pass && ex->color[0].image;
+    ReleaseSRWLockExclusive(&rec_lock);
+    if (!go) return;
+    in_draw_copy = 1;
+    int reopen;
+    VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
+    if (cb) {
+        const VkExecTarget *t = &ex->color[0];
+        char name[64];
+        snprintf(name, sizeof name, "pass_%04d_draw_%03d", seq, pass_draws - 1);
+        AcquireSRWLockExclusive(&rec_lock);
+        const char *why = copy_out(ex, t->image, t->format, t->aspect, t->level, t->base_layer, t->width, t->height, 1, name);
+        if (why) fprintf(passes_f, "draw copy %s skipped: %s\n", name, why);
+        ReleaseSRWLockExclusive(&rec_lock);
+        vk_exec_inline_end(reopen);
+    }
+    in_draw_copy = 0;
+}
+
 void vk_dump_pass_end(VkExec *ex) {
+    if (in_draw_copy) return;   // the pass is closed around a draw copy, not ended
     AcquireSRWLockExclusive(&rec_lock);
     if (!active()) goto out;
     int n = seq++;
@@ -923,6 +1022,7 @@ static void make_dirs(char *path) {
 void vk_dump_init(void) {
     const char *e = cfg_get("MP4_DUMP");
     if (e && !strcmp(e, "xfb")) arm_on_xfb = 1, dump_frame = UINT64_MAX;
+    else if (e && !strcmp(e, "when")) arm_on_call = 1, dump_frame = UINT64_MAX;
     else if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
     const char *lf = cfg_get("MP4_DUMP_LOG");
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
@@ -930,6 +1030,10 @@ void vk_dump_init(void) {
     skip_runs = sr && *sr && *sr != '0';
     const char *du = cfg_get("MP4_DUMP_UBO");
     dump_ubo = du && *du && *du != '0';
+    const char *dd = cfg_get("MP4_DUMP_DRAWS");
+    draws_pass = dd && *dd ? atoi(dd) : -1;
+    const char *dv = cfg_get("MP4_DUMP_VB");
+    dump_vb = dv && *dv && *dv != '0';
     const char *wt = cfg_get("MP4_DUMP_TEX");
     for (char *q = (char *)wt; q && *q && nwant_tex < 16; q += *q == ',') {
         uint32_t *w = want_tex[nwant_tex++];
@@ -960,7 +1064,18 @@ void vk_dump_init(void) {
     }
     vk_dump_armed = 1;
     if (arm_on_xfb) rt_log("vk_dump: the frame of the first transform feedback begin goes to %s", dir);
+    else if (arm_on_call) rt_log("vk_dump: the frame MP4_DUMP_WHEN picks goes to %s", dir);
     else rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+}
+
+// MP4_DUMP=when: a caller picks the dump frame (once); boot.c ring_shot arms it when a present matches MP4_DUMP_WHEN.
+void vk_dump_arm(uint64_t frame) {
+    AcquireSRWLockExclusive(&rec_lock);
+    if (arm_on_call && dump_frame == UINT64_MAX) {
+        dump_frame = frame;
+        rt_log("vk_dump: armed for frame %llu", (unsigned long long)frame);
+    }
+    ReleaseSRWLockExclusive(&rec_lock);
 }
 
 void vk_dump_present(uint64_t frame) {

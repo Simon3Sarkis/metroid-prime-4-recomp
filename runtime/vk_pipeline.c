@@ -873,19 +873,25 @@ static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShader
 
 // Adds a transform feedback layout to a vertex module. NVN programs capture through GLSL xfb qualifiers whose layout
 // the control section does not carry (nvn_api_cmd.c xfb_note), so the layout is taken from the module itself: every
-// Output variable with a Location, in location order, as many bytes as its vector has components, packed from
-// offset 0 of buffer 0. Built-ins (gl_Position) are left out: this game's capture shaders write (0, 0, 0, 1) there
-// and the transformed vertex to location 0. Adds the TransformFeedback capability, the Xfb execution mode and the
-// XfbBuffer, XfbStride and Offset decorations. NULL when the module has no located output.
+// Output variable with a Location, in location order, packed from offset 0 of buffer 0. Built-ins (gl_Position) are
+// left out: this game's capture shaders write (0, 0, 0, 1) there and the transformed vertex to location 0. The
+// translator declares every output a vec4 and opens the shader by storing (0, 0, 0, 1) to each; the components the
+// game's shader declares are the ones stored after that prologue (x, y, z for a vec3), and the capture takes as many:
+// the variable is retyped to that width and the prologue stores to the rest are dropped (the SPH output map, which
+// would say the same, is not read). Adds the TransformFeedback capability, the Xfb execution mode and the XfbBuffer,
+// XfbStride and Offset decorations. NULL when the module has no located output or an output is read back.
 static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
-    enum { OP_CAPABILITY = 17, OP_EXECUTION_MODE = 16, CAP_XFB = 53, MODE_XFB = 11, DEC_OFFSET = 35, DEC_XFB_BUFFER = 36,
-           DEC_XFB_STRIDE = 37 };
-    uint64_t cap_end = 0, ep_end = 0, ann_end = 0;
-    uint32_t ep_id = 0;
-    struct { uint32_t id, loc; } locs[64];
-    struct { uint32_t id, type; } vars[64], ptr[64];
-    struct { uint32_t id, count; } vec[64];
-    int nloc = 0, nvar = 0, nptr = 0, nvec = 0;
+    enum { OP_CAPABILITY = 17, OP_EXECUTION_MODE = 16, OP_ACCESS_CHAIN = 65, OP_LOAD = 61, OP_STORE = 62, OP_LABEL = 248,
+           CAP_XFB = 53, MODE_XFB = 11, DEC_OFFSET = 35, DEC_XFB_BUFFER = 36, DEC_XFB_STRIDE = 37, MAXV = 64 };
+    uint64_t cap_end = 0, ep_end = 0, ann_end = 0, fn_at = 0;
+    uint32_t ep_id = 0, bound = w[3], f32 = 0;
+    struct { uint32_t id, loc; } locs[MAXV];
+    struct { uint32_t id, type, at; } vars[MAXV];     // Output variables: id, pointer type, instruction index
+    struct { uint32_t id, type; } ptr[MAXV];
+    struct { uint32_t id, count; } vec[MAXV];
+    struct { uint32_t id, value; } ic[MAXV];           // int constants (component indices)
+    struct { uint32_t id; float value; } fc[MAXV];     // float constants
+    int nloc = 0, nvar = 0, nptr = 0, nvec = 0, nic = 0, nfc = 0;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
         if (!len || i + len > n) return NULL;
@@ -895,49 +901,143 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
         else if (op == OP_EXECUTION_MODE) ep_end = i + len;
         else if (op == SPV_OP_DECORATE || op == 72 || op == 73 || op == 74 || op == 75 || op == 332 || op == 5632 || op == 5633) {
             ann_end = i + len;
-            if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && nloc < 64) locs[nloc].id = a[0], locs[nloc++].loc = a[2];
-        } else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && nvec < 64) vec[nvec].id = a[0], vec[nvec++].count = a[2];
-        else if (op == SPV_OP_TYPE_POINTER && len >= 4 && a[1] == SPV_SC_OUTPUT && nptr < 64) ptr[nptr].id = a[0], ptr[nptr++].type = a[2];
-        else if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT && nvar < 64) vars[nvar].id = a[1], vars[nvar++].type = a[0];
-        else if (op == SPV_OP_FUNCTION) break;
+            if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && nloc < MAXV) locs[nloc].id = a[0], locs[nloc++].loc = a[2];
+        } else if (op == SPV_OP_TYPE_FLOAT && len >= 3 && a[1] == 32) f32 = a[0];
+        else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && nvec < MAXV) vec[nvec].id = a[0], vec[nvec++].count = a[2];
+        else if (op == SPV_OP_TYPE_POINTER && len >= 4 && a[1] == SPV_SC_OUTPUT && nptr < MAXV) ptr[nptr].id = a[0], ptr[nptr++].type = a[2];
+        else if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT && nvar < MAXV) vars[nvar].id = a[1], vars[nvar].type = a[0], vars[nvar++].at = (uint32_t)i;
+        else if (op == SPV_OP_CONSTANT && len >= 4) {
+            int isf = a[0] == f32;
+            if (isf && nfc < MAXV) { fc[nfc].id = a[1]; memcpy(&fc[nfc].value, &a[2], 4); nfc++; }
+            else if (!isf && nic < MAXV) ic[nic].id = a[1], ic[nic++].value = a[2];
+        } else if (op == SPV_OP_FUNCTION) { fn_at = i; break; }
         i += len;
     }
-    if (!cap_end || !ep_id || ep_end < cap_end || ann_end < ep_end) return NULL;
-    struct { uint32_t id, loc, comps, off; } cap[64];
+    if (!cap_end || !ep_id || !f32 || ep_end < cap_end || ann_end < ep_end || !fn_at) return NULL;
+    // The captured outputs: located variables, and the components stored after the prologue (a store of a constant
+    // 0 or 1 before any other store counts as the prologue)
+    struct { uint32_t id, loc, var, comps, off, newtype; } cap[MAXV];
     int ncap = 0;
     for (int v = 0; v < nvar; v++) {
         int l = 0;
         while (l < nloc && locs[l].id != vars[v].id) l++;
         if (l == nloc) continue;
-        uint32_t comps = 1;
+        uint32_t declared = 1;
         for (int k = 0; k < nptr; k++)
             if (ptr[k].id == vars[v].type)
                 for (int j = 0; j < nvec; j++)
-                    if (vec[j].id == ptr[k].type) comps = vec[j].count;
+                    if (vec[j].id == ptr[k].type) declared = vec[j].count;
         int at = ncap++;
         while (at > 0 && cap[at - 1].loc > locs[l].loc) cap[at] = cap[at - 1], at--;
-        cap[at].id = vars[v].id, cap[at].loc = locs[l].loc, cap[at].comps = comps;
+        cap[at].id = vars[v].id, cap[at].loc = locs[l].loc, cap[at].var = (uint32_t)v, cap[at].comps = declared, cap[at].newtype = 0;
     }
     if (!ncap) return NULL;
-    uint32_t stride = 0;
-    for (int c = 0; c < ncap; c++) cap[c].off = stride, stride += cap[c].comps * 4;
-    uint64_t total = n + 2 + 3 + (uint64_t)ncap * 12;
+    // Stores per captured variable: component access chains and what is stored through them
+    struct { uint32_t chain, var, comp; } chains[256];
+    int nchain = 0;
+    uint32_t written[MAXV] = {0};   // per cap: mask of components with a store after the prologue
+    for (uint64_t i = fn_at; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (op == OP_ACCESS_CHAIN && len >= 5) {
+            for (int c = 0; c < ncap; c++)
+                if (a[2] == cap[c].id && nchain < 256) {
+                    uint32_t comp = 0xffff;
+                    for (int k = 0; k < nic; k++)
+                        if (ic[k].id == a[3]) comp = ic[k].value;
+                    chains[nchain].chain = a[1], chains[nchain].var = (uint32_t)c, chains[nchain++].comp = comp;
+                }
+        } else if (op == OP_STORE && len >= 3) {
+            for (int k = 0; k < nchain; k++)
+                if (chains[k].chain == a[0]) {
+                    int constant01 = 0;
+                    for (int f = 0; f < nfc; f++)
+                        if (fc[f].id == a[1] && (fc[f].value == 0.0f || fc[f].value == 1.0f)) constant01 = 1;
+                    uint32_t c = chains[k].var, comp = chains[k].comp;
+                    if (comp < 4 && !(constant01 && !written[c])) written[c] |= 1u << comp;
+                    else if (comp < 4 && constant01 && written[c]) written[c] |= 1u << comp;   // a constant after real stores counts
+                }
+        } else if (op == OP_LOAD && len >= 4) {
+            for (int k = 0; k < nchain; k++)
+                if (chains[k].chain == a[2]) return NULL;   // the shader reads an output back: not handled
+        }
+        i += len;
+    }
+    uint32_t stride = 0, added = 0;
+    for (int c = 0; c < ncap; c++) {
+        uint32_t m = written[c], comps = m ? 32 - (uint32_t)__builtin_clz(m) : cap[c].comps;   // highest written + 1
+        if (comps < cap[c].comps) {   // narrow the variable: a vector type of that width and an Output pointer to it
+            uint32_t vt = 0, pt = 0;
+            for (int j = 0; j < nvec; j++)
+                if (vec[j].count == comps) {   // only float vectors are declared for outputs here
+                    vt = vec[j].id;
+                    for (int k = 0; k < nptr; k++)
+                        if (ptr[k].type == vt) pt = ptr[k].id;
+                }
+            if (comps == 1) vt = f32;
+            cap[c].newtype = pt;
+            if (!pt) added += (vt ? 0 : 4) + 4;
+            cap[c].comps = comps;
+        }
+        cap[c].off = stride, stride += cap[c].comps * 4;
+    }
+    uint64_t total = n + 2 + 3 + (uint64_t)ncap * 12 + added;
     uint32_t *o = malloc(total * 4), *p = o;
     if (!o) return NULL;
-    memcpy(p, w, cap_end * 4), p += cap_end;
-    *p++ = 2u << 16 | OP_CAPABILITY, *p++ = CAP_XFB;
-    memcpy(p, w + cap_end, (ep_end - cap_end) * 4), p += ep_end - cap_end;
-    *p++ = 3u << 16 | OP_EXECUTION_MODE, *p++ = ep_id, *p++ = MODE_XFB;
-    memcpy(p, w + ep_end, (ann_end - ep_end) * 4), p += ann_end - ep_end;
-    for (int c = 0; c < ncap; c++) {
-        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_BUFFER, *p++ = 0;
-        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_STRIDE, *p++ = stride;
-        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_OFFSET, *p++ = cap[c].off;
+    memcpy(p, w, 5 * 4), p += 5;
+    uint32_t new_vec[MAXV], new_ptr[MAXV];   // ids assigned to the narrowed variables' types
+    for (int c = 0; c < ncap; c++) new_vec[c] = new_ptr[c] = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        int drop = 0;
+        if (i == cap_end) *p++ = 2u << 16 | OP_CAPABILITY, *p++ = CAP_XFB;
+        if (i == ep_end) *p++ = 3u << 16 | OP_EXECUTION_MODE, *p++ = ep_id, *p++ = MODE_XFB;
+        if (i == ann_end)
+            for (int c = 0; c < ncap; c++) {
+                *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_BUFFER, *p++ = 0;
+                *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_STRIDE, *p++ = stride;
+                *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_OFFSET, *p++ = cap[c].off;
+            }
+        if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT) {
+            for (int c = 0; c < ncap; c++)
+                if (cap[c].id == a[1] && cap[c].comps < 4 && !cap[c].newtype) {
+                    uint32_t vt = cap[c].comps == 1 ? f32 : 0;
+                    for (int j = 0; j < nvec && !vt; j++)
+                        if (vec[j].count == cap[c].comps) vt = vec[j].id;
+                    if (!vt) vt = bound++, *p++ = 4u << 16 | SPV_OP_TYPE_VECTOR, *p++ = vt, *p++ = f32, *p++ = cap[c].comps;
+                    uint32_t pt = bound++;
+                    *p++ = 4u << 16 | SPV_OP_TYPE_POINTER, *p++ = pt, *p++ = SPV_SC_OUTPUT, *p++ = vt;
+                    cap[c].newtype = pt;
+                }
+            for (int c = 0; c < ncap; c++)
+                if (cap[c].id == a[1] && cap[c].newtype) {
+                    memcpy(p, w + i, len * 4);
+                    p[1] = cap[c].newtype;
+                    p += len, drop = 1;
+                }
+        } else if (i >= fn_at && op == OP_ACCESS_CHAIN && len >= 5) {
+            for (int k = 0; k < nchain; k++)
+                if (chains[k].chain == a[1] && chains[k].comp < 4 && chains[k].comp >= cap[chains[k].var].comps) drop = 1;
+            if (drop) { i += len; continue; }
+        } else if (i >= fn_at && op == OP_STORE && len >= 3) {
+            for (int k = 0; k < nchain; k++)
+                if (chains[k].chain == a[0] && chains[k].comp < 4 && chains[k].comp >= cap[chains[k].var].comps) drop = 1;
+            if (drop) { i += len; continue; }
+        }
+        if (!drop) memcpy(p, w + i, len * 4), p += len;
+        i += len;
     }
-    memcpy(p, w + ann_end, (n - ann_end) * 4), p += n - ann_end;
+    o[3] = bound;
     *out_n = (uint64_t)(p - o);
     static int said;
-    if (said++ < 4) rt_log("vk_pipeline: transform feedback layout: %d outputs, stride %u", ncap, stride);
+    if (said++ < 4) {
+        char desc[160] = "";
+        size_t dn = 0;
+        for (int c = 0; c < ncap && dn < sizeof desc - 20; c++)
+            dn += (size_t)snprintf(desc + dn, sizeof desc - dn, " %u:vec%u@%u", cap[c].loc, cap[c].comps, cap[c].off);
+        rt_log("vk_pipeline: transform feedback layout: %d outputs, stride %u:%s", ncap, stride, desc);
+    }
     return o;
 }
 

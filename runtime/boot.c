@@ -263,6 +263,10 @@ static void box_filter(const uint8_t *px, uint32_t w, uint32_t h, int bgra, uint
         }
 }
 
+// MP4_DUMP_WHEN=blue:<count>[@<present>] (with MP4_DUMP=when and the ring on): a present, from the given one on, with
+// at least count pure-blue pixels in its 800x450 copy (b > 200, r < 80, g < 120: the stray blue triangles give some
+// 3500, the beam's flash and the menus under 100) arms the frame dump for the present after the next, so a glitch
+// that moves between runs is dumped where it happens.
 // MP4_SHOT_RING=<n> [MP4_SHOTS_DIR=dir]: the last n presents are kept in memory at 800x450 and written as
 // <dir>/ring_f<present>.png when P is pressed in the window (gfx_window.c, rt_shot_ring_dump) or at present
 // MP4_SHOT_RING_AT=<present>, for glitches that last a frame: press P right after one. Reading each present back
@@ -308,6 +312,23 @@ static void ring_shot(const tex_t *t, uint64_t n) {
     AcquireSRWLockExclusive(&ring_lock);
     box_filter(px, w, h, bgra, ring[ring_next].px, RING_W, RING_H);
     ring[ring_next].frame = n;
+    static unsigned long long when_blue = ULLONG_MAX, when_from;
+    if (when_blue == ULLONG_MAX) {
+        const char *e = cfg_get("MP4_DUMP_WHEN");
+        char *q = NULL;
+        when_blue = e && !strncmp(e, "blue:", 5) ? strtoull(e + 5, &q, 10) : 0;
+        when_from = q && *q == '@' ? strtoull(q + 1, NULL, 10) : 0;
+    }
+    if (when_blue && n >= when_from) {
+        const uint8_t *o = ring[ring_next].px;
+        unsigned long long blue = 0;
+        for (uint64_t i = 0; i < 4ull * RING_W * RING_H; i += 4)
+            blue += o[i + 2] > 200 && o[i] < 80 && o[i + 1] < 120;
+        if (blue >= when_blue) {
+            rt_log("boot: present %llu has %llu pure-blue pixels: arming the dump", (unsigned long long)n, blue);
+            vk_dump_arm(n + 2);
+        }
+    }
     if (++ring_next == ring_n) ring_next = 0, ring_full = 1;
     ReleaseSRWLockExclusive(&ring_lock);
     if (at && n == at) rt_shot_ring_dump();

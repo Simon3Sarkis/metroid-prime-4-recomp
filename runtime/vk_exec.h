@@ -167,6 +167,11 @@ void vk_dump_init(void);                 // reads the environment; vk_exec_recor
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
 void vk_dump_xfb(VkExec *ex, uint32_t op, const void *payload);   // OP_XFB_BIND / OP_XFB_BEGIN / OP_XFB_END, as a note
+void vk_dump_arm(uint64_t frame);                                 // MP4_DUMP=when: the dump frame, once (boot.c)
+void vk_dump_after_draw(VkExec *ex);                              // after a draw's command: MP4_DUMP_DRAWS copies
+void vk_dump_draw_params(VkExec *ex, int indexed, int prim, int first, int count, int instances, int base_instance, int base_vertex);
+// vk_exec_draw.c: the control section, code and code length of NVN stage st of program p; 0 when it has none
+int vk_exec_find_stage(const prog_t *p, int st, const uint8_t **ctl, const uint8_t **code, uint32_t *len);
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs
