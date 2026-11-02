@@ -823,6 +823,7 @@ static void count_use(int cls, int use, uint64_t n) {
 // A buffer descriptor for [addr, addr+size) of guest memory: its backing (a pool's VRAM mirror when it has one) when
 // aligned, a copy in transient memory when the backing is host memory with an unaligned offset. 0 when neither works.
 // written: the shader stores into it (a mirror's range goes back to guest memory at the end of the submission).
+static void xfb_before_draw(VkExec *ex);   // below: begins a capture before the first draw of a bracket
 static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, uint64_t max, int use, int written,
                       VkDescriptorBufferInfo *out) {
     VkMemSpan sp;
@@ -2116,6 +2117,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
     s.y_flip = 1;
     s.prim_restart = (uint8_t)(restart != 0);
+    s.xfb = (uint8_t)(ex->xfb_active != 0);   // a capture draw gets the vertex shader with the transform feedback layout
     const VkPipeInfo *info = NULL;
     int pending;
     // A draw of at most 6 vertices over half the render area or more (a full-screen triangle or quad, a tile) waits for
@@ -2126,7 +2128,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     static uint64_t wait_left_ns;
     uint32_t wait_ms = 0;
     uint64_t t0 = 0;
-    if (oneshot > 0) {
+    if (oneshot > 0 || ex->xfb_active) {   // a capture draw waits too: skipped, the CPU would read back nothing
         wait_ms = ONESHOT_WAIT_MS;
     } else if (skip < 2 && count <= 6 && (uint64_t)sc.extent.width * sc.extent.height * 2 >= (uint64_t)ex->pass_w * ex->pass_h) {
         uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -2200,6 +2202,7 @@ static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType
 static void op_draw(VkExec *ex, const p_draw *d) {
     c0_binst = (uint32_t)d->base_instance;
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, 0)) return;
+    xfb_before_draw(ex);
     if (vk_dump_armed) rt_log("dump: draw prim %d first %d count %d instances %d base %d", d->prim, d->first, d->count,
                               d->instances, d->base_instance);
     vk_exec_frame.draws++;
@@ -2254,6 +2257,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
     if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
+    xfb_before_draw(ex);
     vk_exec_frame.draws++;
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
     VkMemSpan sp;
@@ -2293,6 +2297,7 @@ static void op_draw_ind(VkExec *ex, const p_draw_ind *d) {
     if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &ip) || ip.offset % 4)
         return warn_once(W_INDIRECT, "indirect draw arguments at %#llx are not backed or not aligned: draws skipped", (unsigned long long)d->ind);
     if (!prepare_draw(ex, d->prim, 0x7fffffff, 0)) return;
+    xfb_before_draw(ex);
     vk_exec_frame.draws++;
     VK_MEM_USE(ip);
     vkCmdDrawIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndirectCommand));
@@ -2314,6 +2319,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     if (!vk_mem_resolve(d->ibuf, 1, &ib) || ib.offset % (d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? 2 : 4))
         return warn_once(W_INDEX, "index buffer %#llx is not backed or not aligned: indirect draws skipped", (unsigned long long)d->ibuf);
     if (!prepare_draw(ex, d->prim, 0x7fffffff, restart_for(ex, d->prim, d->itype))) return;
+    xfb_before_draw(ex);
     vk_exec_frame.draws++;
     VK_MEM_USE(ip);
     VK_MEM_USE(ib);
@@ -2573,5 +2579,94 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     case OP_DRAW_IND: op_draw_ind(ex, payload); break;
     case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
     default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
+    }
+}
+
+// Transform feedback (nvn_api_cmd.c BindTransformFeedbackBuffer, Begin/EndTransformFeedback), replayed with
+// VK_EXT_transform_feedback. This game brackets a few rasterizer-discard draws every few seconds whose vertex shader
+// transforms positions for the CPU to read back (the buffer is 1 MiB, the control buffer is not written yet). The
+// bindings and the open begin are replay state; the first draw after the begin binds the buffers and begins the
+// capture in the open pass (xfb_before_draw, after prepare_draw bound the pipeline that carries the layout), the end
+// op or the pass end ends it, and a barrier after the pass hands the vertices to the write-back (bind_range with
+// written: the range goes back to guest memory at the fence). The calls go through the recorder (vk_rec.c
+// rec_xfb_*), in order with the draws. vk_dump_draw marks the captured draws "xfb" in the pass log.
+static PFN_vkCmdBindTransformFeedbackBuffersEXT xfb_bind_fn;
+static PFN_vkCmdBeginTransformFeedbackEXT xfb_begin_fn;
+static PFN_vkCmdEndTransformFeedbackEXT xfb_end_fn;
+static int xfb_fns(void) {
+    static int tried, ok;
+    if (tried) return ok;
+    tried = 1;
+    VkDevice dev = vk_ctx()->device;
+    if (vk_ctx()->has_transform_feedback) {
+        xfb_bind_fn = (PFN_vkCmdBindTransformFeedbackBuffersEXT)vkGetDeviceProcAddr(dev, "vkCmdBindTransformFeedbackBuffersEXT");
+        xfb_begin_fn = (PFN_vkCmdBeginTransformFeedbackEXT)vkGetDeviceProcAddr(dev, "vkCmdBeginTransformFeedbackEXT");
+        xfb_end_fn = (PFN_vkCmdEndTransformFeedbackEXT)vkGetDeviceProcAddr(dev, "vkCmdEndTransformFeedbackEXT");
+        ok = xfb_bind_fn && xfb_begin_fn && xfb_end_fn;
+    }
+    if (!ok) rt_log("vk_exec: transform feedback is not replayed: the device has no VK_EXT_transform_feedback");
+    return ok;
+}
+static void xfb_before_draw(VkExec *ex) {
+    if (!ex->xfb_active || ex->xfb_begun || !ex->in_pass || !xfb_fns()) return;
+    VkBuffer bufs[4];
+    VkDeviceSize offs[4], sizes[4];
+    uint32_t n = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!ex->xfb_buf[i].addr || !ex->xfb_buf[i].size) break;
+        VkDescriptorBufferInfo bi;
+        if (!bind_range(ex, ex->xfb_buf[i].addr, ex->xfb_buf[i].size, 4, ex->xfb_buf[i].size, VK_MUSE_GPU_WRITE, 1, &bi)) {
+            static int said;
+            if (said++ < 4) rt_log("vk_exec: transform feedback buffer %d at %#llx is not backed: not captured", i, (unsigned long long)ex->xfb_buf[i].addr);
+            return;
+        }
+        note_written(ex, ex->xfb_buf[i].addr, bi.range);
+        bufs[n] = bi.buffer, offs[n] = bi.offset, sizes[n] = bi.range, n++;
+    }
+    if (!n) return;
+    rec_xfb_bind(xfb_bind_fn, ex->cb, 0, n, bufs, offs, sizes);   // through the recorder, in order with the draws
+    rec_xfb_begin(xfb_begin_fn, ex->cb);
+    ex->xfb_begun = 1;
+    ex->recorded += 2;
+    static int said;
+    if (said++ < 4)
+        rt_log("vk_exec: transform feedback begins into %u buffer%s (%#llx, %llu bytes) in frame %llu", n, n == 1 ? "" : "s",
+               (unsigned long long)ex->xfb_buf[0].addr, (unsigned long long)sizes[0], (unsigned long long)gfx_counters.frames);
+}
+void vk_exec_xfb_pass_end(VkExec *ex, int after) {
+    if (!after) {
+        if (!ex->xfb_begun) return;
+        rec_xfb_end(xfb_end_fn, ex->cb);
+        ex->xfb_begun = 0, ex->xfb_ended = 1, ex->recorded++;
+        if (ex->xfb_active) {
+            static int said;
+            if (said++ < 4) rt_log("vk_exec: a pass ended inside a transform feedback bracket: the next pass captures from offset 0 again");
+        }
+        return;
+    }
+    if (!ex->xfb_ended) return;
+    ex->xfb_ended = 0;
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(ex->cb, &di);   // the recorder's wrapper: after its EndRendering
+    ex->recorded++;
+}
+void vk_exec_op_xfb(VkExec *ex, uint32_t op, const void *payload) {
+    switch (op) {
+    case OP_XFB_BIND: {
+        const p_xfb_bind *b = payload;
+        if (b->index >= 0 && b->index < 4) ex->xfb_buf[b->index].addr = b->addr, ex->xfb_buf[b->index].size = b->size;
+        break;
+    }
+    case OP_XFB_BEGIN: ex->xfb_active = 1, ex->xfb_control = ((const p_xfb_ctl *)payload)->control; break;
+    case OP_XFB_END: {
+        if (ex->xfb_begun) rec_xfb_end(xfb_end_fn, ex->cb), ex->xfb_begun = 0, ex->xfb_ended = 1, ex->recorded++;
+        ex->xfb_active = 0;
+        break;
+    }
+    default: break;
     }
 }

@@ -91,6 +91,14 @@ typedef struct VkExec {
     p_render_cond render_cond;           // last OP_RENDER_COND
     int has_render_cond;
 
+    // ---- transform feedback (vk_exec_draw.c vk_exec_op_xfb): the buffers of OP_XFB_BIND, and whether an OP_XFB_BEGIN is
+    // open (its control buffer in xfb_control); the draws in between are the captured ones
+    struct { uint64_t addr, size; } xfb_buf[4];
+    int xfb_active;
+    uint64_t xfb_control;
+    int xfb_begun;                       // vkCmdBeginTransformFeedbackEXT recorded in the open pass (xfb_before_draw)
+    int xfb_ended;                       // ended in the pass about to close: a barrier follows vkCmdEndRendering
+
     // ---- internal to vk_exec.c
     void *views;                         // image views created for this command buffer (freed at its fence)
     int nviews, cap_views;
@@ -158,6 +166,7 @@ extern int vk_dump_armed;
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
+void vk_dump_xfb(VkExec *ex, uint32_t op, const void *payload);   // OP_XFB_BIND / OP_XFB_BEGIN / OP_XFB_END, as a note
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs
@@ -179,6 +188,11 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 // vk_exec_xfer.c: OP_COPY_B2B, OP_COPY_B2T, OP_COPY_T2B, OP_COPY_T2T, OP_CLEAR_TEX, OP_SIGNAL_EVENT, OP_REPORT_COUNTER,
 // OP_RESET_COUNTER, OP_RENDER_ENABLE, OP_RENDER_COND, OP_CLEAR_BUF.
 void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload);
+// vk_exec_draw.c: OP_XFB_BIND, OP_XFB_BEGIN, OP_XFB_END (transform feedback state)
+void vk_exec_op_xfb(VkExec *ex, uint32_t op, const void *payload);
+// vk_exec_draw.c: the pass is ending: before vkCmdEndRendering (after 0) ends an open capture, after it (after 1)
+// records the barrier that makes the captured vertices visible to the write-back and the CPU
+void vk_exec_xfb_pass_end(VkExec *ex, int after);
 // vk_exec_xfer.c, samples-passed counting: a draw about to be recorded in the open pass (begins an occlusion query
 // when counting and none is active), and the open pass about to end (ends the active query).
 void vk_exec_oq_draw(VkExec *ex);

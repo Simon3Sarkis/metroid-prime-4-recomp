@@ -41,6 +41,7 @@ enum {
     R_SetRasterizerDiscardEnable, R_SetScissorWithCount, R_SetStencilCompareMask, R_SetStencilOp, R_SetStencilReference,
     R_SetStencilTestEnable, R_SetStencilWriteMask, R_SetViewportWithCount, R_WriteTimestamp, R_WriteTimestamp2,
     R_PushTpl, R_Push, R_VertexInput, R_Bool, R_PolygonMode, R_BlendEnable, R_BlendEquation, R_WriteMask, R_EndCb,
+    R_XfbBind, R_XfbBegin, R_XfbEnd,
 };
 
 static uint64_t now_ns(void) {
@@ -547,6 +548,31 @@ TARGET_CMD(rec_blend_enable, R_BlendEnable, PFN_vkCmdSetColorBlendEnableEXT, VkB
 TARGET_CMD(rec_blend_equation, R_BlendEquation, PFN_vkCmdSetColorBlendEquationEXT, VkColorBlendEquationEXT)
 TARGET_CMD(rec_write_mask, R_WriteMask, PFN_vkCmdSetColorWriteMaskEXT, VkColorComponentFlags)
 
+// Transform feedback (vk_exec_draw.c xfb_before_draw): the buffer binding, and begin/end without counter buffers.
+typedef struct { PFN_vkCmdBindTransformFeedbackBuffersEXT fn; uint32_t first, n; VkBuffer b[4]; VkDeviceSize o[4], sz[4]; } A_XfbBind;
+void rec_xfb_bind(PFN_vkCmdBindTransformFeedbackBuffersEXT fn, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b,
+                  const VkDeviceSize *o, const VkDeviceSize *sz) {
+    if (n > 4) n = 4;
+    if (!OWNED(cb)) { fn(cb, first, n, b, o, sz); return; }
+    A_XfbBind *a = put(R_XfbBind, sizeof *a);
+    *a = (A_XfbBind){fn, first, n};
+    memcpy(a->b, b, sizeof *b * n), memcpy(a->o, o, sizeof *o * n), memcpy(a->sz, sz, sizeof *sz * n);
+    pub();
+}
+typedef struct { void *fn; } A_XfbCtl;
+void rec_xfb_begin(PFN_vkCmdBeginTransformFeedbackEXT fn, VkCommandBuffer cb) {
+    if (!OWNED(cb)) { fn(cb, 0, 0, NULL, NULL); return; }
+    A_XfbCtl *a = put(R_XfbBegin, sizeof *a);
+    *a = (A_XfbCtl){(void *)fn};
+    pub();
+}
+void rec_xfb_end(PFN_vkCmdEndTransformFeedbackEXT fn, VkCommandBuffer cb) {
+    if (!OWNED(cb)) { fn(cb, 0, 0, NULL, NULL); return; }
+    A_XfbCtl *a = put(R_XfbEnd, sizeof *a);
+    *a = (A_XfbCtl){(void *)fn};
+    pub();
+}
+
 // ---- the recorder's side
 
 static void exec_packet(uint32_t op, void *p) {
@@ -621,6 +647,9 @@ static void exec_packet(uint32_t op, void *p) {
     case R_BlendEnable: { A_Targets *a = p; ((PFN_vkCmdSetColorBlendEnableEXT)a->fn)(cb, a->first, a->n, a->v); break; }
     case R_BlendEquation: { A_Targets *a = p; ((PFN_vkCmdSetColorBlendEquationEXT)a->fn)(cb, a->first, a->n, a->v); break; }
     case R_WriteMask: { A_Targets *a = p; ((PFN_vkCmdSetColorWriteMaskEXT)a->fn)(cb, a->first, a->n, a->v); break; }
+    case R_XfbBind: { A_XfbBind *a = p; a->fn(cb, a->first, a->n, a->b, a->o, a->sz); break; }
+    case R_XfbBegin: { A_XfbCtl *a = p; ((PFN_vkCmdBeginTransformFeedbackEXT)a->fn)(cb, 0, 0, NULL, NULL); break; }
+    case R_XfbEnd: { A_XfbCtl *a = p; ((PFN_vkCmdEndTransformFeedbackEXT)a->fn)(cb, 0, 0, NULL, NULL); break; }
     case R_EndCb: {
         A_EndCb *a = p;
         if (a->kind) vk_crumb(cb, a->kind, a->n);

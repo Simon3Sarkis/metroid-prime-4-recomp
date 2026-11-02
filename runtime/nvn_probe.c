@@ -461,6 +461,9 @@ static uint64_t record_all(void) {
     REC(OP_DRAW_IND, CALL(nvnCommandBufferDrawArraysIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, 0xc300));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferClearBuffer, U(c), 0xc200, 0x40, 0xdeadbeef));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferReportValue, U(c), 0x1234, 0xc300));
+    REC(OP_XFB_BIND, CALL(nvnCommandBufferBindTransformFeedbackBuffer, U(c), 1, 0xd000, 0x100));
+    REC(OP_XFB_BEGIN, CALL(nvnCommandBufferBeginTransformFeedback, U(c), 0xd100));
+    REC(OP_XFB_END, CALL(nvnCommandBufferEndTransformFeedback, U(c), 0xd100));
     static const int thresholds[4] = {1, 2, 3, 4};
     CALL(nvnCommandBufferSetColorReductionEnable, U(c), 1);   // hints: nothing recorded
     CALL(nvnCommandBufferSetColorReductionThresholds, U(c), 0, U(thresholds));
@@ -691,6 +694,12 @@ static void parse_all(uint64_t h) {
                       (p->addr == 0xc300 && p->size == 4 && p->value == 0x1234), "CLEAR_BUF payload (ClearBuffer, ReportValue)");
             break;
         }
+        case OP_XFB_BIND: {
+            const p_xfb_bind *p = a;
+            CHECK(p->index == 1 && p->addr == 0xd000 && p->size == 0x100, "XFB_BIND payload");
+            break;
+        }
+        case OP_XFB_BEGIN: case OP_XFB_END: CHECK(((const p_xfb_ctl *)a)->control == 0xd100, "XFB_BEGIN/END payload"); break;
         default: CHECK(0, "unexpected op %s", nvn_op_name(o->op)); break;
         }
     }

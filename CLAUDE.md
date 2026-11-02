@@ -63,9 +63,10 @@ the window origin is NVN's lower-left default (render targets bottom-up, flipped
 bounds how far the CPU runs ahead of the GPU (`MP4_GPU_AHEAD`), which the game's timer-query pool needs. The
 cinematic's AAC audio is decoded by the lifted library (its audio codecs are software). The first area renders
 (front face mirrored for the lower-left origin, shadow-backed virtual pools for the streamed light volumes, integer
-samplers, shader image stores tracked). The BC6H light volume's sparse tile shape (16x16x16 blocks, found by comparing dumps) lit the arm cannon and brightened the scene. Next: transform feedback (stubbed; the control sections logged with
-`MP4_XFB_LOG=1`; the game binds one buffer, begins, draws and ends, then reads the buffer back on the CPU), the
-remaining stray glows, then further areas. Test runs: `build/input/newgame.txt`
+samplers, shader image stores tracked). The BC6H light volume's sparse tile shape (16x16x16 blocks, found by comparing dumps) lit the arm cannon and brightened the scene. Transform feedback is replayed (`VK_EXT_transform_feedback`, layout from the vertex shader's outputs, calls through
+the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). Next: confirm with the user whether the stray glows
+and the occasional green blob are gone, the control buffer write-back if the game turns out to read it, then
+further areas. Test runs: `build/input/newgame.txt`
 with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
 `runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
 `runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.

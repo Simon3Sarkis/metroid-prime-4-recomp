@@ -871,6 +871,76 @@ static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShader
     st->pNext = rq;
 }
 
+// Adds a transform feedback layout to a vertex module. NVN programs capture through GLSL xfb qualifiers whose layout
+// the control section does not carry (nvn_api_cmd.c xfb_note), so the layout is taken from the module itself: every
+// Output variable with a Location, in location order, as many bytes as its vector has components, packed from
+// offset 0 of buffer 0. Built-ins (gl_Position) are left out: this game's capture shaders write (0, 0, 0, 1) there
+// and the transformed vertex to location 0. Adds the TransformFeedback capability, the Xfb execution mode and the
+// XfbBuffer, XfbStride and Offset decorations. NULL when the module has no located output.
+static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
+    enum { OP_CAPABILITY = 17, OP_EXECUTION_MODE = 16, CAP_XFB = 53, MODE_XFB = 11, DEC_OFFSET = 35, DEC_XFB_BUFFER = 36,
+           DEC_XFB_STRIDE = 37 };
+    uint64_t cap_end = 0, ep_end = 0, ann_end = 0;
+    uint32_t ep_id = 0;
+    struct { uint32_t id, loc; } locs[64];
+    struct { uint32_t id, type; } vars[64], ptr[64];
+    struct { uint32_t id, count; } vec[64];
+    int nloc = 0, nvar = 0, nptr = 0, nvec = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) return NULL;
+        const uint32_t *a = w + i + 1;
+        if (op == OP_CAPABILITY && !cap_end) cap_end = i + len;
+        else if (op == SPV_OP_ENTRY_POINT) ep_id = a[1], ep_end = i + len;
+        else if (op == OP_EXECUTION_MODE) ep_end = i + len;
+        else if (op == SPV_OP_DECORATE || op == 72 || op == 73 || op == 74 || op == 75 || op == 332 || op == 5632 || op == 5633) {
+            ann_end = i + len;
+            if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && nloc < 64) locs[nloc].id = a[0], locs[nloc++].loc = a[2];
+        } else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && nvec < 64) vec[nvec].id = a[0], vec[nvec++].count = a[2];
+        else if (op == SPV_OP_TYPE_POINTER && len >= 4 && a[1] == SPV_SC_OUTPUT && nptr < 64) ptr[nptr].id = a[0], ptr[nptr++].type = a[2];
+        else if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT && nvar < 64) vars[nvar].id = a[1], vars[nvar++].type = a[0];
+        else if (op == SPV_OP_FUNCTION) break;
+        i += len;
+    }
+    if (!cap_end || !ep_id || ep_end < cap_end || ann_end < ep_end) return NULL;
+    struct { uint32_t id, loc, comps, off; } cap[64];
+    int ncap = 0;
+    for (int v = 0; v < nvar; v++) {
+        int l = 0;
+        while (l < nloc && locs[l].id != vars[v].id) l++;
+        if (l == nloc) continue;
+        uint32_t comps = 1;
+        for (int k = 0; k < nptr; k++)
+            if (ptr[k].id == vars[v].type)
+                for (int j = 0; j < nvec; j++)
+                    if (vec[j].id == ptr[k].type) comps = vec[j].count;
+        int at = ncap++;
+        while (at > 0 && cap[at - 1].loc > locs[l].loc) cap[at] = cap[at - 1], at--;
+        cap[at].id = vars[v].id, cap[at].loc = locs[l].loc, cap[at].comps = comps;
+    }
+    if (!ncap) return NULL;
+    uint32_t stride = 0;
+    for (int c = 0; c < ncap; c++) cap[c].off = stride, stride += cap[c].comps * 4;
+    uint64_t total = n + 2 + 3 + (uint64_t)ncap * 12;
+    uint32_t *o = malloc(total * 4), *p = o;
+    if (!o) return NULL;
+    memcpy(p, w, cap_end * 4), p += cap_end;
+    *p++ = 2u << 16 | OP_CAPABILITY, *p++ = CAP_XFB;
+    memcpy(p, w + cap_end, (ep_end - cap_end) * 4), p += ep_end - cap_end;
+    *p++ = 3u << 16 | OP_EXECUTION_MODE, *p++ = ep_id, *p++ = MODE_XFB;
+    memcpy(p, w + ep_end, (ann_end - ep_end) * 4), p += ann_end - ep_end;
+    for (int c = 0; c < ncap; c++) {
+        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_BUFFER, *p++ = 0;
+        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_STRIDE, *p++ = stride;
+        *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_OFFSET, *p++ = cap[c].off;
+    }
+    memcpy(p, w + ann_end, (n - ann_end) * 4), p += n - ann_end;
+    *out_n = (uint64_t)(p - o);
+    static int said;
+    if (said++ < 4) rt_log("vk_pipeline: transform feedback layout: %d outputs, stride %u", ncap, stride);
+    return o;
+}
+
 static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
@@ -1199,7 +1269,7 @@ typedef struct {                       // normalized: zero where the state is dy
     uint32_t color[8], depth, stencil; // VkFormat
     uint8_t n_color, samples, topo_class, minus_w;
     uint8_t clamp, poly_mode, a2c, logic_op;   // logic_op: VkLogicOp + 1 when enabled
-    uint8_t blend_en, dsb, fbl, pad;  // dsb: an enabled target blends with a SRC1 factor; fbl: VkPipeState.feedback
+    uint8_t blend_en, dsb, fbl, xfb;  // dsb: an enabled target blends with a SRC1 factor; fbl: VkPipeState.feedback; xfb: .xfb
     uint32_t wmask;
     uint8_t blend[8][6];               // src, dst, op, src alpha, dst alpha, alpha op (VkBlendFactor / VkBlendOp)
     uint32_t attr_fmt[32], attr_off[32];
@@ -1266,6 +1336,7 @@ static void gkey_fill(const VkPipeState *s, GKey *k) {
     k->minus_w = s->depth_minus_w != 0;
     k->dsb = s->fs && P.f_dual_src && uses_src1(s);
     k->fbl = s->fs ? s->feedback : 0;
+    k->xfb = s->xfb != 0;
     if (!P.dyn_clamp) k->clamp = s->depth_clamp && P.f_depth_clamp;
     if (!P.dyn_poly) k->poly_mode = (uint8_t)polygon_mode(s->poly.mode);
     if (!P.dyn_a2c) k->a2c = s->ms.a2c != 0;
@@ -1362,8 +1433,14 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         // A bound colour target outside the shader's output map gets write mask 0 (target_wmask)
         if (fcode) fm = make_module(fcode, fw);
     }
+    uint32_t *xpatched = NULL;
+    if (s->xfb) {   // a capture draw: the vertex shader carries the transform feedback layout
+        uint64_t n2 = 0;
+        if ((xpatched = spirv_add_xfb(vcode, vw, &n2))) vcode = xpatched, vw = n2;
+        else LOG_ONCE("vk_pipeline: cannot add the transform feedback layout to the vertex shader");
+    }
     vm = make_module(vcode, vw);
-    free(vpatched), free(fpatched);
+    free(vpatched), free(fpatched), free(xpatched);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm)) goto out;
 
@@ -1469,7 +1546,7 @@ typedef struct Lib { struct Lib *next; uint64_t hash; VkPipeline pipe; uint32_t 
 static Lib *libs[LIB_BUCKETS];
 
 typedef struct { uint32_t kind, topo_class, attr_fmt[32], attr_off[32]; uint8_t attr_bind[32], rate[17], pad[3]; } ViKey;
-typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, pad; GfxShaderIo fin[32]; } PrKey;
+typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, xfb; GfxShaderIo fin[32]; } PrKey;
 typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, pad; const GfxShader *fs; } FsKey;
 typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, pad[3]; uint32_t color[8], depth, stencil, wmask;
                  uint8_t blend[8][6]; } FoKey;
@@ -1549,7 +1626,12 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         sw = vw;
         if (pk->missing && (patched = spirv_add_outputs(vcode, vw, pk->missing, pk->fin, &n2))) vcode = patched, vw = n2;
         else if (pk->missing) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", pk->missing);
-        if (!(m = make_module(vcode, vw))) goto out;
+        uint32_t *xp = NULL;
+        if (pk->xfb && (xp = spirv_add_xfb(vcode, vw, &n2))) vcode = xp, vw = n2;
+        else if (pk->xfb) LOG_ONCE("vk_pipeline: cannot add the transform feedback layout to the vertex shader");
+        m = make_module(vcode, vw);
+        free(xp);
+        if (!m) goto out;
         st.stage = VK_SHADER_STAGE_VERTEX_BIT, st.module = m;
         pin_subgroup32(&st, &rq, scode, sw);
         pi.stageCount = 1, pi.pStages = &st, pi.pViewportState = &vp, pi.pRasterizationState = &rs;
@@ -1737,6 +1819,7 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     memset(pk, 0, sizeof *pk);
     GfxShaderIo fin[32];
     pk->kind = LIB_PR, pk->vs = s->vs, pk->clamp = k->clamp, pk->poly_mode = k->poly_mode, pk->minus_w = k->minus_w;
+    pk->xfb = k->xfb;
     pk->missing = vs_union_missing(s, fin);
     for (int i = 0; i < 32; i++)
         if (pk->missing >> i & 1) pk->fin[i] = fin[i];

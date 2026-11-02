@@ -557,43 +557,22 @@ NVN_API(nvnCommandBufferSetDepthClamp) { REC(cmd_of(c), OP_DEPTH_CLAMP, p_flag)-
 NVN_API(nvnCommandBufferSetRenderEnable) { REC(cmd_of(c), OP_RENDER_ENABLE, p_flag)->value = nvn_arg_bool(c, 1) != 0; }
 // Rasterizer discard runs vertex work without rasterising; with no transform feedback that equals not drawing.
 NVN_API(nvnCommandBufferSetRasterizerDiscard) { REC(cmd_of(c), OP_RASTER_DISCARD, p_flag)->value = nvn_arg_bool(c, 1) != 0; }
-// Transform feedback, which this game sets up in its first gameplay frames: not replayed yet. The bindings and the
-// begin/end/pause/resume calls are accepted and dropped, and DrawTransformFeedback draws nothing, so the draws that
-// would read the captured vertices read nothing. A full replay needs VK_EXT_transform_feedback and the streamout
-// layout of the vertex program's control section. Each entry is logged once.
-static _Thread_local const prog_t *xfb_last_prog;   // the program this thread bound last (BindProgram), for the log below
+// Transform feedback, replayed with VK_EXT_transform_feedback (vk_exec_draw.c xfb_before_draw). Every few seconds the
+// game binds a 1 MiB buffer, begins, draws a few rasterizer-discard triangle lists whose vertex shader transforms
+// positions, ends, and reads the buffer back on the CPU. The streamout layout is not in the program's control section
+// (the fields that differ between programs are the vertex attribute order at 0x7f8/0x804, present in every program),
+// so the replay takes it from the vertex shader's outputs (vk_pipeline.c spirv_add_xfb). Pause, Resume and
+// DrawTransformFeedback are not used by this game and stay dropped, logged once. MP4_XFB_LOG=1 logs each begin's frame
+// (for MP4_DUMP=xfb) and the control buffer's contents at begin and end (what the game pre-fills; End does not write
+// it back yet, the game has not been seen to read it).
 static void xfb_note(const char *what) {
     static volatile LONG said[8];
     int k = what[0] == 'B' && what[1] == 'i' ? 0 : what[0] == 'B' ? 1 : what[0] == 'E' ? 2 : what[0] == 'P' ? 3 : what[0] == 'R' ? 4 : 5;
-    if (InterlockedIncrement(&said[k]) == 1) rt_log("nvn: transform feedback is not replayed: %s dropped", what);
-    // MP4_XFB_LOG=1: the control sections of the program bound at a Begin, the nonzero dwords outside the usual fields,
-    // for finding where GLSLC keeps the streamout layout (the first three begins).
+    if (k >= 3 && InterlockedIncrement(&said[k]) == 1) rt_log("nvn: transform feedback: %s is not replayed (dropped)", what);
     static volatile LONG begins;
-    if (k == 1 && cfg_bool("MP4_XFB_LOG") && InterlockedIncrement(&begins) <= 3 && xfb_last_prog) {
-        const prog_t *p = xfb_last_prog;
-        for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
-            const uint8_t *ctl = p->sd[i].control;
-            if (!ctl) continue;
-            char line[1600] = "";
-            size_t n = 0;
-            for (int o = 0; o < 0x880 && n < sizeof line - 40; o += 4) {
-                uint32_t v;
-                memcpy(&v, ctl + o, 4);
-                if (!v || (o >= 0x7d0 && o < 0x7e8) || o == 0x700 || o == 0x704 || o == 0x708 || o == 0x790 || o == 0x7c8 || o == 0x7e8) continue;
-                n += (size_t)snprintf(line + n, sizeof line - n, " %x=%x", o, v);
-            }
-            rt_log("nvn: transform feedback begin: program %p stage %u control (%p):%s", (const void *)p, i, (const void *)ctl, line);
-            if (i == 0) {   // the vertex stage's bytes past the 0x880 fields, in rows of 64: dword 0x6f8 names 0xe90 for
-                // a vertex program with streamout against 0x790 for its fragment stage, so the streamout layout (the
-                // Maxwell varying selectors, bytes 0x28.. per captured component) may follow the usual section
-                for (int o = 0x880; o < 0xe90; o += 64) {
-                    char hex[3 * 64 + 1];
-                    for (int j = 0; j < 64; j++) snprintf(hex + 3 * j, 4, "%02x ", ctl[o + j]);
-                    rt_log("nvn: transform feedback vertex control %#x: %s", o, hex);
-                }
-            }
-        }
-    }
+    if (k != 1 || !cfg_bool("MP4_XFB_LOG")) return;
+    LONG nb = InterlockedIncrement(&begins);
+    if (nb <= 40) rt_log("nvn: transform feedback begin %ld at frame %llu", (long)nb, (unsigned long long)gfx_stats().frames);
 }
 // void nvnCommandBufferBindTransformFeedbackBuffer(NVNcommandBuffer *cmd, int index, NVNbufferAddress addr, size_t size)
 NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) {
@@ -602,12 +581,35 @@ NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) {
     if (InterlockedIncrement(&said) <= 8)
         rt_log("nvn: BindTransformFeedbackBuffer index %d addr %#llx size %#llx", (int)arg_x(c, 1), (unsigned long long)arg_x(c, 2),
                (unsigned long long)arg_x(c, 3));
+    *REC(cmd_of(c), OP_XFB_BIND, p_xfb_bind) = (p_xfb_bind){(int32_t)arg_x(c, 1), 0, arg_x(c, 2), arg_x(c, 3)};
 }
 // void nvnCommandBufferBindTransformFeedbackBuffers(NVNcommandBuffer *cmd, int first, int n, const NVNbufferRange *r)
-NVN_API(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; xfb_note("BindTransformFeedbackBuffers"); }
+NVN_API(nvnCommandBufferBindTransformFeedbackBuffers) {
+    xfb_note("BindTransformFeedbackBuffers");
+    int first = (int)arg_x(c, 1), n = (int)arg_x(c, 2);
+    const NVNbufferRange *r = arg_p(c, 3);
+    for (int i = 0; i < n; i++) *REC(cmd_of(c), OP_XFB_BIND, p_xfb_bind) = (p_xfb_bind){first + i, 0, r[i].address, r[i].size};
+}
 // void nvnCommandBufferBegin/End/Pause/ResumeTransformFeedback(NVNcommandBuffer *cmd, NVNbufferAddress control)
-NVN_API(nvnCommandBufferBeginTransformFeedback) { (void)c; xfb_note("BeginTransformFeedback"); }
-NVN_API(nvnCommandBufferEndTransformFeedback) { (void)c; xfb_note("EndTransformFeedback"); }
+// MP4_XFB_LOG=1 also prints the 32 bytes at the control address as recorded (what the game pre-fills: the offsets
+// Begin loads and End overwrites), for the first bracket pairs.
+static void xfb_control_log(const char *what, uint64_t control) {
+    static volatile LONG said;
+    if (!cfg_bool("MP4_XFB_LOG") || InterlockedIncrement(&said) > 8 || !control) return;
+    const uint32_t *w = (const uint32_t *)(uintptr_t)control;
+    rt_log("nvn: %s control %#llx: %08x %08x %08x %08x %08x %08x %08x %08x", what, (unsigned long long)control, w[0], w[1], w[2], w[3],
+           w[4], w[5], w[6], w[7]);
+}
+NVN_API(nvnCommandBufferBeginTransformFeedback) {
+    xfb_note("BeginTransformFeedback");
+    xfb_control_log("BeginTransformFeedback", arg_x(c, 1));
+    REC(cmd_of(c), OP_XFB_BEGIN, p_xfb_ctl)->control = arg_x(c, 1);
+}
+NVN_API(nvnCommandBufferEndTransformFeedback) {
+    xfb_note("EndTransformFeedback");
+    xfb_control_log("EndTransformFeedback", arg_x(c, 1));
+    REC(cmd_of(c), OP_XFB_END, p_xfb_ctl)->control = arg_x(c, 1);
+}
 NVN_API(nvnCommandBufferPauseTransformFeedback) { (void)c; xfb_note("PauseTransformFeedback"); }
 NVN_API(nvnCommandBufferResumeTransformFeedback) { (void)c; xfb_note("ResumeTransformFeedback"); }
 // void nvnCommandBufferDrawTransformFeedback(NVNcommandBuffer *cmd, NVNdrawPrimitive mode, NVNbufferAddress control)
@@ -630,7 +632,6 @@ NVN_API(nvnCommandBufferSetRenderEnableConditional) {
 }
 // void nvnCommandBufferBindProgram(NVNcommandBuffer *cmd, const NVNprogram *program, int stages)
 NVN_API(nvnCommandBufferBindProgram) {
-    xfb_last_prog = arg_p(c, 1);
     *REC(cmd_of(c), OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){arg_p(c, 1), (int)arg_x(c, 2)};
 }
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
@@ -1024,7 +1025,7 @@ const char *nvn_op_name(uint32_t op) {
         "BIND_VSTREAM", "BIND_VBUF", "BIND_UBO", "BIND_SSBO", "BIND_TEX", "BIND_SAMP", "STENCIL", "POLY_OFFSET", "DRAW",
         "DRAW_IDX", "DISPATCH", "BARRIER", "SET_TEX_POOL", "SET_SAMP_POOL", "COPY_B2T", "COPY_STRIDE", "BLEND_COLOR",
         "COPY_T2B", "BIND_IMG", "COPY_T2T", "RESET_COUNTER", "CLEAR_TEX", "DEPTH_CLAMP", "RENDER_ENABLE",
-        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "COPY_IMG_STRIDE", "DRAW_IND",
+        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "COPY_IMG_STRIDE", "DRAW_IND", "XFB_BIND", "XFB_BEGIN", "XFB_END",
     };
     _Static_assert(sizeof names / sizeof *names == OP_COUNT_, "one name per op");
     return op < OP_COUNT_ ? names[op] : "?";

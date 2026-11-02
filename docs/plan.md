@@ -174,6 +174,23 @@ the null decoder). No host AAC decoder needed.
   conclusive for BC6H. With that the cannon is lit and the scene brighter; the tone mapper's exposure (the first
   float of its c3 block, 0.031 at frame 7200 with `MP4_DUMP_UBO=1`) is live, fed by the 1x1 luminance reduction,
   two vertex-shader passes over storage buffers and a 64-byte copy the CPU reads back.
+- Transform feedback is replayed (VK_EXT_transform_feedback). Every ~245 frames the game binds a 1 MiB buffer,
+  begins, draws four rasterizer-discard triangle lists with a vertex-only program that transforms positions
+  (gl_Position gets (0, 0, 0, 1), location 0 the world-space vertex), ends, and reads the buffer back on the CPU;
+  with the bracket dropped it read whatever the buffer held. The capture layout is not in the program's control
+  section: the fields that differ between programs (dword 0x7f8 and the bytes at 0x804) are a vertex attribute order
+  every program has, and 0x714/0x734, once taken for streamout flags, are set in nearly every program. The replay
+  takes the layout from the translated vertex shader instead (`vk_pipeline.c spirv_add_xfb`: the located outputs in
+  location order, packed, with the TransformFeedback capability, the Xfb execution mode and the XfbBuffer, XfbStride
+  and Offset decorations), keyed by a bit in the pipeline key and the pre-raster library key. The command stream
+  carries the bind, begin and end (`OP_XFB_*`); the first draw after a begin binds the buffer and begins the capture
+  in the open pass, the end op or the pass end ends it, and a synchronization-2 barrier after the pass hands the
+  vertices to the write-back. The calls go through the recorder thread (`vk_rec.c rec_xfb_*`): made directly they
+  ran ahead of the draws the recorder had still queued, which the validation layer reported as a begin under a
+  pipeline without Xfb and a barrier inside the pass. `MP4_DUMP=xfb` dumps the frame of the first begin from there
+  on and marks the captured draws "xfb"; `MP4_DUMP_BUF` on the buffer showed the captured positions. The control
+  buffer (32 bytes at the begin and end addresses, zero as the game fills it) is not written back yet. Whether the
+  readback was behind the stray glows is for the user's next session to tell.
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).

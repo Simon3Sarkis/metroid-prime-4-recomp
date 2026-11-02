@@ -51,6 +51,7 @@ static char dir[400];
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
 static int skip_runs, dump_ubo;        // MP4_DUMP_SKIP_RUNS, MP4_DUMP_UBO
+static int arm_on_xfb;                 // MP4_DUMP=xfb: the dump frame is the one whose replay meets the first transform feedback begin
 static uint32_t want_tex[16][2];       // MP4_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -707,8 +708,9 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
         goto out;
     }
     Str b = {0};
-    sp(&b, "vs %016llx fs %016llx prog %llu prim %d\n", (unsigned long long)shader_hash(s->vs),
-       (unsigned long long)shader_hash(s->fs), (unsigned long long)(ex->prog ? ex->prog->serial : 0), s->prim);
+    sp(&b, "vs %016llx fs %016llx prog %llu prim %d%s\n", (unsigned long long)shader_hash(s->vs),
+       (unsigned long long)shader_hash(s->fs), (unsigned long long)(ex->prog ? ex->prog->serial : 0), s->prim,
+       ex->xfb_active ? " xfb" : "");
     state_line(&b, ex, s);
     describe_bindings(&b, ex, info);
     ents[nents++] = (Ent){p, th, 1, b.s};
@@ -845,6 +847,27 @@ static void region_desc(const NVNcopyRegion *r, char *buf, size_t n) {
     snprintf(buf, n, "(%d,%d,%d %dx%dx%d)", r->xoffset, r->yoffset, r->zoffset, r->width, r->height, r->depth);
 }
 
+// Transform feedback bindings and begin/end, as notes like the copies (the draws in between carry "xfb").
+void vk_dump_xfb(VkExec *ex, uint32_t op, const void *payload) {
+    (void)ex;
+    AcquireSRWLockExclusive(&rec_lock);
+    if (arm_on_xfb && op == OP_XFB_BEGIN && dump_frame == UINT64_MAX) {   // MP4_DUMP=xfb: this frame, from here on
+        dump_frame = frame_now();
+        rt_log("vk_dump: transform feedback begin: dumping frame %llu from here", (unsigned long long)dump_frame);
+    }
+    if (!active()) goto out;
+    if (op == OP_XFB_BIND) {
+        const p_xfb_bind *b = payload;
+        fprintf(passes_f, "xfb bind after pass %d: buffer %d at %#llx size %#llx\n", seq - 1, b->index, (unsigned long long)b->addr,
+                (unsigned long long)b->size);
+    } else {
+        fprintf(passes_f, "xfb %s after pass %d: control %#llx\n", op == OP_XFB_BEGIN ? "begin" : "end", seq - 1,
+                (unsigned long long)((const p_xfb_ctl *)payload)->control);
+    }
+out:
+    ReleaseSRWLockExclusive(&rec_lock);
+}
+
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload) {
     (void)ex;
     AcquireSRWLockExclusive(&rec_lock);
@@ -899,7 +922,8 @@ static void make_dirs(char *path) {
 
 void vk_dump_init(void) {
     const char *e = cfg_get("MP4_DUMP");
-    if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
+    if (e && !strcmp(e, "xfb")) arm_on_xfb = 1, dump_frame = UINT64_MAX;
+    else if (!e || !*e || !(dump_frame = strtoull(e, NULL, 10))) return;
     const char *lf = cfg_get("MP4_DUMP_LOG");
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
     const char *sr = cfg_get("MP4_DUMP_SKIP_RUNS");
@@ -935,7 +959,8 @@ void vk_dump_init(void) {
         if (bd_size && !(bufs_f = fopen(path, "w"))) bd_size = 0;
     }
     vk_dump_armed = 1;
-    rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
+    if (arm_on_xfb) rt_log("vk_dump: the frame of the first transform feedback begin goes to %s", dir);
+    else rt_log("vk_dump: frame %llu goes to %s", (unsigned long long)dump_frame, dir);
 }
 
 void vk_dump_present(uint64_t frame) {

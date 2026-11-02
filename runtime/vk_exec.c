@@ -123,6 +123,11 @@ WEAK void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload) {
     rt_fatal("vk: op %s is not replayed yet", nvn_op_name(op));
 }
 
+WEAK void vk_exec_op_xfb(VkExec *ex, uint32_t op, const void *payload) {
+    (void)ex, (void)payload;
+    rt_fatal("vk: op %s is not replayed yet", nvn_op_name(op));
+}
+
 enum { W_UNRENDERABLE, W_LEVEL, W_LAYER, W_VIEW_FORMAT, W_BLOCK_VIEW, W_BLOCK_LAYERS, W_CLEAR_TARGET, W_CLEAR_MASK, W_STENCIL_MASK, W_COUNT };
 
 static void warn_once(int key, const char *fmt, ...) {
@@ -653,9 +658,11 @@ void vk_exec_pass_begin(VkExec *ex) {
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
     vk_exec_oq_pass_end(ex);
+    vk_exec_xfb_pass_end(ex, 0);
     vkCmdEndRendering(ex->cb);
     ex->recorded++;
     ex->in_pass = 0;
+    vk_exec_xfb_pass_end(ex, 1);
     if (vk_crumbs_ops()) vk_crumb_op(ex->cb, "pass end");
     for (int i = 0; i < ex->pass_ncolor && i < 8; i++)   // stand-ins of 3D BC targets go to their textures
         if (ex->color[i].image && ex->color[i].img && ex->color[i].img->image != ex->color[i].image)
@@ -924,6 +931,10 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG:
             vk_exec_op_draw(ex, h->op, a);
+            break;
+        case OP_XFB_BIND: case OP_XFB_BEGIN: case OP_XFB_END:
+            if (vk_dump_armed) vk_dump_xfb(ex, h->op, a);
+            vk_exec_op_xfb(ex, h->op, a);
             break;
         case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX:
             if (h->op != OP_CLEAR_TEX) vk_exec_frame.copies++;
