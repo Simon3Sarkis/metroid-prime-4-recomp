@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/nvn_obj.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/nvn_obj.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; win_t keeps the fence of each image's last present.
 // From totk-pc-recomp runtime/nvn_obj.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; adds SetCopyImageStride (OP_COPY_IMG_STRIDE) for FE3H.
 // Ported from MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/nvn_obj.h and the two types of nvn_tex.h @ b75be8cf (MIT, Copyright (c) 2026 jhaizhou; origin d2r-mobile); Metal entry points dropped, layouts unchanged.
 // NVN host-side object layout and command record format: shared by hle_nvn.c (interface layer, writes) and nvn_mtl.m (Metal replay layer, reads).
@@ -78,7 +78,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval, active; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, active, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, active, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], fence[4], acq[4], acquires; } win_t;   // ticket[i]: ticket of the most recent present of image i; fence[i]: the newest submit when it was last presented; acq[k]: the newest submit at the k-th last acquire
 FITS(win_t, NVNwindow);
 
 // Command records live in host memory; finished copies are owned by guest control memory.

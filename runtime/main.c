@@ -239,6 +239,34 @@ static void break_dump(const char *what, uint64_t a, size_t n) {
     }
 }
 
+// MP4_BREAK_FOLLOW=[x<n>:]<off>[,<off>...][@<off>]: from x0 (or x<n>), load the pointer at each offset in turn and
+// dump 64 bytes at the end of the chain, from "@<off>" into the final object (an object reached through a list entry,
+// say: its first word is its vtable).
+static void break_follow(const Cpu *c) {
+    const char *follow = cfg_value("MP4_BREAK_FOLLOW");
+    if (follow && *follow) {
+        int reg = 0;
+        const char *s = follow;
+        if (s[0] == 'x' && s[1] >= '0' && s[1] <= '7' && s[2] == ':') reg = s[1] - '0', s += 3;
+        uint64_t q = c->x[reg], at = 0;
+        char chain[96];
+        snprintf(chain, sizeof chain, "x%d", reg);
+        for (; *s && q;) {
+            char *end;
+            if (*s == '@') { at = strtoull(s + 1, &end, 16); s = end; break; }
+            uint64_t off = strtoull(s, &end, 16);
+            if (end == s) break;
+            q = guest_readable(q + off, 8) ? *(const uint64_t *)(uintptr_t)(q + off) : 0;
+            snprintf(chain + strlen(chain), sizeof chain - strlen(chain), "->[+%#llx]", (unsigned long long)off);
+            s = *end == ',' ? end + 1 : end;
+        }
+        if (q) {
+            snprintf(chain + strlen(chain), sizeof chain - strlen(chain), "=%#llx+%#llx", (unsigned long long)q, (unsigned long long)at);
+            break_dump(chain, q + at, 64);
+        }
+    }
+}
+
 void fnprof_hit(uint64_t addr, void *cpu) {
     const Cpu *c = cpu;
     static volatile LONG resolved;
@@ -255,14 +283,32 @@ void fnprof_hit(uint64_t addr, void *cpu) {
     }
     for (int k = 0; k < g_break_count; k++) {
         if (addr != g_breaks[k].addr) continue;
-        if (InterlockedIncrement(&g_break_hits) > 4000) return;
+        // MP4_BREAK_BRIEF=1: one line per hit with x0..x3 and 32 bytes at x0+0x30, up to 400,000 hits, for a value's
+        // trajectory over a run; otherwise the full dump, 4,000 hits.
+        static int brief = -1;
+        if (brief < 0) brief = !strcmp(cfg_value("MP4_BREAK_BRIEF"), "1");
+        LONG hits = InterlockedIncrement(&g_break_hits);
+        if (hits > (brief ? 400000 : 4000)) return;
         char at[128], lr[128];
+        if (brief) {
+            char peek[3 * 32 + 1] = "";
+            if (guest_readable(c->x[0] + 0x30, 32))
+                for (int i = 0; i < 32; i++) snprintf(peek + 3 * i, 4, "%02x ", *(const uint8_t *)(uintptr_t)(c->x[0] + 0x30 + i));
+            rt_log("break: %s from %s: x0 %#llx x1 %#llx x2 %#llx x3 %#llx; x0+0x30: %s", ldr_describe(addr, at, sizeof at),
+                   ldr_describe(c->x[30] - 4, lr, sizeof lr), (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+                   (unsigned long long)c->x[2], (unsigned long long)c->x[3], peek);
+            break_follow(c);
+            continue;
+        }
         rt_log("break: %s from %s: x0 %#llx x1 %#llx x2 %#llx x3 %#llx x4 %#llx x8 %#llx sp %#llx", ldr_describe(addr, at, sizeof at),
                ldr_describe(c->x[30] - 4, lr, sizeof lr), (unsigned long long)c->x[0], (unsigned long long)c->x[1],
                (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[4],
                (unsigned long long)c->x[8], (unsigned long long)c->sp);
         break_dump("x0", c->x[0], 192);
         break_dump("x1", c->x[1], 64);
+        // MP4_BREAK_FOLLOW=<off>[,<off>...]: from x0, load the pointer at each offset in turn and dump 64 bytes at
+        // the end of the chain (an object reached through a list entry, say: its first word is its vtable)
+        break_follow(c);
         for (int w = 0; w < g_watch_count; w++) {
             if (!guest_readable(g_watches[w].addr, 8)) continue;
             uint64_t obj = *(const uint64_t *)(uintptr_t)g_watches[w].addr;

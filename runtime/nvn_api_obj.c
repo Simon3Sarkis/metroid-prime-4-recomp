@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/nvn_api_obj.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/nvn_api_obj.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds the sparse tile layout queries; WindowAcquireTexture waits for the GPU's completion of the image's last present.
 // From totk-pc-recomp runtime/nvn_api_obj.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; tracks the live windows for nvn_window_uses_pool (FE3H frees a pool per loaded resource); texture and sampler ids are slots of their pool (FE3H uses several pools).
 // NVN front end, second slice: descriptor pools, textures, samplers, programs,
 // windows with present pacing, and the state objects. Ported from MacNativeGames
@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "gfx.h"
+#include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -173,6 +174,50 @@ NVN_API(nvnTextureBuilderGetStorageAlignment) {
     ret_x(c, L.align);
 }
 
+// ---------- Sparse tile layout
+// NVNtextureSparseTileLayout {int numTiledLevels, tileWidth, tileHeight, tileDepth; uint32_t reserved[4]}: how a
+// sparse texture (one in a VIRTUAL pool, mapped tile by tile) is cut into 64 KiB tiles. Maxwell's tiles, in blocks,
+// by bytes per block: 1 -> 256x256, 2 -> 256x128, 4 -> 128x128, 8 -> 128x64, 16 -> 64x64; a 3D texture's tile has
+// depth and a smaller face. The levels at least one tile wide and high are tiled; the smaller ones go into the mip
+// tail, which is not sparse. This game (first seen in its opening cinematic) is the first on this host to ask.
+typedef struct { int32_t levels, w, h, d; uint32_t reserved[4]; } sparse_layout_t;
+
+static void sparse_layout(const nvn_texdesc *d, sparse_layout_t *o) {
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    memset(o, 0, sizeof *o);
+    if (!bpb) {
+        rt_log("nvn: sparse tile layout: unknown format %#x", d->format);
+        return;
+    }
+    int tw, th, td = 1;
+    switch (bpb) {
+    case 1: tw = 256, th = 256; break;
+    case 2: tw = 256, th = 128; break;
+    case 4: tw = 128, th = 128; break;
+    case 8: tw = 128, th = 64; break;
+    default: tw = 64, th = 64; break;   // 16
+    }
+    int is_3d = d->target == NVN_TEXTURE_TARGET_3D;
+    if (is_3d) {   // the same 64 KiB as 16 slices of a quarter-size face
+        tw /= 4, th /= 4, td = 16;
+        if (bpb >= 8) tw *= 2, th /= 2;
+    }
+    tw *= bw, th *= bh;
+    int tiled = 0;
+    for (uint32_t l = 0; l < d->levels; l++) {
+        uint32_t w = d->width >> l, h = d->height >> l;
+        if (w < (uint32_t)tw || h < (uint32_t)th) break;
+        tiled++;
+    }
+    o->levels = tiled, o->w = tw, o->h = th, o->d = td;
+    static volatile LONG said;
+    if (InterlockedIncrement(&said) <= 4)
+        rt_log("nvn: sparse tile layout of %ux%ux%u format %#x target %d, %u levels: %dx%dx%d tiles, %d tiled levels", d->width,
+               d->height, d->depth, d->format, d->target, d->levels, tw, th, td, tiled);
+}
+// void nvnTextureBuilderGetSparseTileLayout(const NVNtextureBuilder *b, NVNtextureSparseTileLayout *out)
+NVN_API(nvnTextureBuilderGetSparseTileLayout) { sparse_layout(&TB(c)->d, arg_p(c, 1)); }
+
 // ---------- Textures
 // The game re-initializes transient textures (G-buffer and the like) every frame at the same pool memory without
 // registering the descriptor again, as an NVN descriptor refers to memory and stays valid on hardware. The table maps
@@ -262,6 +307,8 @@ NVN_API(nvnTextureGetWidth) { ret_x(c, CTX(c)->d.width); }
 NVN_API(nvnTextureGetHeight) { ret_x(c, CTX(c)->d.height); }
 NVN_API(nvnTextureGetDepth) { ret_x(c, CTX(c)->d.depth); }
 NVN_API(nvnTextureGetStorageSize) { ret_x(c, (uint32_t)(int)CTX(c)->L.size); }
+// void nvnTextureGetSparseTileLayout(const NVNtexture *t, NVNtextureSparseTileLayout *out)
+NVN_API(nvnTextureGetSparseTileLayout) { sparse_layout(&CTX(c)->d, arg_p(c, 1)); }
 // NVNboolean nvnTextureCompare(const NVNtexture *a, const NVNtexture *b)
 NVN_API(nvnTextureCompare) {
     const tex_t *x = arg_p(c, 0), *y = arg_p(c, 1);
@@ -672,6 +719,7 @@ NVN_API(nvnWindowInitialize) {
         ret_x(c, 0);
         return;
     }
+    rt_log("nvn: window of %d textures, %d active, interval %d", o->ntex, o->active, o->interval);
     memcpy(o->tex, s->tex, sizeof o->tex);
     const tex_t *t0 = (const tex_t *)o->tex[0];
     NVN_LOG("WindowInitialize %d textures, interval %d, first %ux%u format %#x", o->ntex, o->interval,
@@ -743,11 +791,44 @@ NVN_API(nvnWindowAcquireTexture) {
         sleep_until(at);
         perf_end(PERF_PACE, p0);
     }
-    // The sync means "the display no longer reads this image". Presents are copies queued in submit order, so it is
-    // already satisfied: fenced = 3 with fence 0.
+    // The image is also free only once the GPU finished the frame it was last presented with: on the Switch the
+    // display's release of the image implies that, and games count on it to keep their CPU at most a window's worth
+    // of frames ahead of the GPU. This game's frame bookkeeping underflowed when the CPU ran further ahead during
+    // pipeline-build stalls (its GPU progress counter fell behind the fences it waited for). So the acquire waits for
+    // the newest submit of that present, and the sync means that fence (fenced = 1); an image never presented is
+    // free at once (fenced = 3 with fence 0).
+    uint64_t f = idx < 4 ? o->fence[idx] : 0;
+    // MP4_GPU_AHEAD=<n> (default 1): the acquire also waits until the GPU completed every submit made before the
+    // n-th last acquire, so the CPU keeps at most n frames of work queued ahead of the GPU whatever the window's
+    // image count. This game's pool of GPU timer queries holds three per profiler and refills only from queries whose
+    // submit completed; at a frame's first pop the submits of two frames ago must be done, which on hardware the
+    // GPU's pace provides and a replay stalled by pipeline builds does not (the crash in main+0x115980). 0 serialises
+    // CPU and GPU frames; a larger n loosens the bound.
+    static int ahead = -1;
+    if (ahead < 0) {
+        const char *e = cfg_get("MP4_GPU_AHEAD");
+        ahead = e && *e ? atoi(e) : 1;
+        if (ahead < 0 || ahead > 3) ahead = 1;
+    }
+    uint64_t now_f = nvn_fence_last();
+    if (o->acquires >= (uint64_t)ahead) {
+        uint64_t g = o->acq[(o->acquires - (uint64_t)ahead) & 3];   // 0 for "at this acquire"
+        if (ahead == 0) g = now_f;
+        if (g > f) f = g;
+    }
+    o->acq[o->acquires++ & 3] = now_f;
+    if (f) {
+        const GfxBackend *b = gfx_backend();
+        if (b->fence_done() < f) {
+            uint64_t p0 = perf_begin();
+            b->fence_wait(f, ~0ull);
+            perf_end(PERF_PACE, p0);
+        }
+        b->cpu_synced(f);
+    }
     if (s) {
-        s->fenced = 3;
-        s->fence = 0;
+        s->fenced = f ? 1 : 3;
+        s->fence = f;
     }
     ret_x(c, NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS);
 }
@@ -770,6 +851,7 @@ NVN_API(nvnQueuePresentTexture) {
     gfx_backend()->present(t, o->crop, slot);
     o->ticket[idx] = o->presents;
     o->avail[idx] = slot + period;
+    o->fence[idx] = nvn_fence_last();   // the frame rendered into this image was submitted before its present
     frame_step_present(slot, o->interval);   // frame_rate.c: the real-time step follows the display times
     rt_frame_presented(t, o->presents);
 }

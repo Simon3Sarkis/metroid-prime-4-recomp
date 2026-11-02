@@ -104,6 +104,36 @@ Diagnostics added on the way: `MP4_BREAK_AT` and `MP4_BREAK_WATCH` (a log at cho
 arguments and a watched global), the fs trace's open, directory and read lines, the movie decoder's call log. Settings
 reach a Windows process started from WSL only through `WSLENV`.
 
+**The window origin (2026-11-03):** the opening cinematic's text crawl showed a faded, vertically flipped copy of
+itself. The frame dump (`MP4_DUMP`) placed it: the bloom chain's first downsample came out upside down while the
+tone map from the same source, same vertex shader, same quad and same uniforms did not; and with no host change
+between runs the tone map came out upside down as well, so the quads themselves map texture v=0 to the bottom of the
+viewport. That is GL's render-to-texture convention, and the game keeps NVN's default window origin, LOWER_LEFT
+(`nvnDeviceSetWindowOriginMode` is logged now; TotK sets UPPER_LEFT, so the host never met the default). In that mode
+NDC +y lands on the last memory row of a render target and the display turns the window texture over; window y is the
+memory row in both modes, so viewports, scissors, `gl_FragCoord` and the front face need no change. The host now keeps
+Vulkan's own viewport orientation for the lower-left origin instead of the negative-height viewport it uses for the
+upper-left one, turns the frame over in the present blit (and the upscaler's), and reverses the rows of screenshots
+and dump PNGs so they read as the screen does (`nvn_origin_lower_left` in `nvn_api_core.c`; `vk_exec_draw.c`,
+`gfx_window.c`, `vk_fsr.c`, `boot.c`, `vk_dump.c`). Two wrong turns on the way, both reverted: mirroring viewport
+and scissor rectangles against the target height plus the translator's YNegate for `gl_FragCoord`, and mirroring the
+front face; the dump showed the bloom shader reads no `gl_FragCoord` at all.
+
+**The cinematic crash (2026-11-03):** a few seconds into the opening cinematic the game faulted in `main+0x115980`,
+a pop from an empty pool of GPU timer queries (three per profiler object; the pop with a count of zero overwrites the
+count with a pointer and the next pop reads wild). A breakpoint trace (`MP4_BREAK_AT` on the pop, the query's
+IsReady and its fence setter, `MP4_BREAK_BRIEF=1`, `MP4_BREAK_FOLLOW=x1:0x978@0x340`) showed the bookkeeping: each
+query carries the game's submit count at issue, the game's reclaim (`main+0xbb880`) polls its syncs in order with a
+zero timeout and advances a completed count, and a query returns to the pool once the completed count reaches its
+value. Each of two profilers pops one query per frame, so at a frame's first pop the submits of two frames ago must
+have completed. Hardware's GPU pace gives that; the host's replay, stalled by a pipeline build, let the CPU run up to
+five submits ahead (seen in the trace) and the pool ran dry in three of six runs. The window acquire now bounds the
+distance: it waits for the GPU to finish the image's last present (as the display's release implies on hardware) and
+for every submit made before the previous acquire (`MP4_GPU_AHEAD`, default 1 frame of overlap; 0 serialises the
+frames). Three scripted runs through the cinematic pass at 59 fps. `nvnSyncWait` logs a blocking wait that times
+out and a poll that fails eight times on the same fence, which ruled out a stuck sync first. On the way the game also
+asked for `nvnTextureBuilderGetSparseTileLayout`, answered with Maxwell's 64 KiB tile sizes by bytes per block.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

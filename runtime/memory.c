@@ -341,6 +341,8 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");
     heap_size = size;
     ReleaseSRWLockExclusive(&lock);
+    rt_log("memory: heap %#llx+%#llx (pool %#llx, images %#llx)", (unsigned long long)L.heap.base, (unsigned long long)size,
+           (unsigned long long)L.pool, (unsigned long long)image_bytes());
     if (addr) *addr = L.heap.base;
     return R_OK;
 }

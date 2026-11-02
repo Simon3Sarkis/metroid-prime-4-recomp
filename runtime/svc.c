@@ -194,8 +194,18 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = 0;
         return;
     }
-    case 0x2C: x[0] = mem_map_physical(x[0], x[1]); return;
-    case 0x2D: x[0] = mem_unmap_physical(x[0], x[1]); return;
+    case 0x2C: {   // MapPhysicalMemory(x0 address, x1 size): rare, and where the game grows past its heap; always logged
+        uint64_t a = x[0], n = x[1];
+        x[0] = mem_map_physical(a, n);
+        rt_log("svc: MapPhysicalMemory(%#llx, %#llx) -> %#x", (unsigned long long)a, (unsigned long long)n, (unsigned)x[0]);
+        return;
+    }
+    case 0x2D: {
+        uint64_t a = x[0], n = x[1];
+        x[0] = mem_unmap_physical(a, n);
+        rt_log("svc: UnmapPhysicalMemory(%#llx, %#llx) -> %#x", (unsigned long long)a, (unsigned long long)n, (unsigned)x[0]);
+        return;
+    }
     case 0x26: {   // Break(x0 reason, x1 info, x2 info size); bit 31 of the reason: notification only
         uint32_t result = 0;
         if (x[1] && x[2] >= 4 && readable(x[1], 4)) memcpy(&result, (const void *)(uintptr_t)x[1], 4);
