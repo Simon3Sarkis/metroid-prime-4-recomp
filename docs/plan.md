@@ -26,13 +26,37 @@ What FE3H hit between the first black frames and its title screen is in fe3h-pc-
 Expect the SDK-version class of problem again, in the other direction: FE3H's SDK was older than TotK's and this
 game's is newer.
 
+**Started 2026-11-02.** The lifter, runtime, tests and build tools came over from fe3h-pc-recomp @ `47ef991` in one
+copy (see "Shared core"); the translator built as `build/xlate/mp4_xlate.exe`. Game-bound tables rewritten for this
+game before the first build: the boot driver (`runtime/boot.c`: three modules, their init_array sizes, the 1 MiB main
+stack, the first `nvnBootstrapLoader` return address per version, and SDK 19.3's three-callback `nn::init::Start`,
+which is TotK's form again after FE3H's two-callback 6.5.0), the main stack in `runtime/kernel.c`, the version names in
+`tools/build_game.py`, the module bases in `tests/diff/lift.py`, and the window title. `runtime/ov_mp4.c` starts
+empty: no entry of FE3H's `ov_fe3h.c` applies, as `main` imports no network namespace.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are
-candidates for a shared Switch recomp library. Already identical at the start:
+candidates for a shared Switch recomp library.
+
+Identical at the start (Phase 0):
 
 - `recomp/nso.py`: unchanged through all three projects.
 - `tools/check_content.py`: only the marker name differs per project.
 - `tools/build_hactool.py`, `tools/extract_exefs.py`, `tools/extract_romfs.py`, `tools/romfs_reader.py`: unchanged
   from fe3h-pc-recomp apart from their headers. The title id and version come from the dump, so nothing in them
   names a game.
+
+The copy of 2026-11-02 (Phase 1), from fe3h-pc-recomp @ `47ef991`, 176 text files plus the vendored translator sources:
+
+- 86 files copied unchanged: all of `recomp/` (the lifter ran unchanged over this game's three modules in Phase 0 with
+  no unsupported instruction), `tests/`, the NVN front end's core, the Vulkan back end's larger part, the texture
+  code, the platform layer, the shaders and their SPIR-V headers, `tools/xlate/`.
+- 90 files that differ only by the rename of `fe3h` to `mp4` and `FE3H_` to `MP4_` (the executable, settings file,
+  environment variables, window): the kernel, SVCs, IPC, fs, RomFS, audio renderer, the rest of the NVN and Vulkan
+  code, the menu, the build tools. Each file's first line says which.
+- Rewritten for this game: the tables listed under Phase 1. Not taken: FE3H's overrides, patch tables, expected-hash
+  files, installer and release tools.
+
+The answer so far: a third game needed one mechanical copy and about a hundred lines of game-bound tables to reach
+a build. What the boot reveals goes under Phase 1.

@@ -1,0 +1,35 @@
+# From fe3h-pc-recomp fe3h.ini.example @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+# mp4.ini: settings for mp4.exe. Copy this file to mp4.ini next to mp4.exe and remove the '#' of a line to change it.
+# Each line shows the default. A MP4_* environment variable of the same name (MP4_FPS_LIMIT for fps_limit) overrides
+# the file. Keys are case-insensitive; '#' and ';' start a comment; [sections] only group lines (runtime/cfg.c).
+
+[frame rate]
+# Frame rate limit: 30 or 60. The game's logic runs at 30; 60 is untested on this game.
+# fps_limit = 60
+
+[display]
+# Full screen (1) or a window (0).
+# fullscreen = 0
+# Window size, WxH.
+# window_size = 1920x1080
+# Vulkan present mode: mailbox (the default), fifo (vsync) or immediate.
+# vk_present = mailbox
+# Which GPU, by index in the Vulkan device list (the best one when unset).
+# gpu_index = 0
+
+[language]
+# The game's language, a Switch language code: ja, en-US, en-GB, fr, fr-CA, de, it, es, es-419, zh-Hans, zh-Hant, ko
+# (nl, pt, pt-BR and ru fall back inside the game). The Windows user locale decides when unset.
+# lang = en-US
+# docked (the console in its dock, 1080p) or handheld (720p).
+# operation_mode = docked
+
+[audio]
+# Volume, 0 to 100.
+# volume = 100
+
+[input]
+# Button prompts and layout: auto (from the controller), nintendo or xbox.
+# pad_layout = auto
+# Rumble strength in percent, and off with 0.
+# rumble_strength = 80
