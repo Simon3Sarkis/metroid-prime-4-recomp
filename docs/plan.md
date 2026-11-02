@@ -93,8 +93,12 @@ loads its save, presents frames at 58 fps and plays its intro movie. What stood 
   in for any other type, taking the stream and dropping it so the player reaches its end. The conversion to RGBA is
   SSE2; a 1080p60 stream decodes in 4 ms, two at once in 15-19 ms, and a few percent of frames drop.
 - Audio. The game's final mix goes through an Aux effect to the game's own DSP code and back, into a 5.1 device sink;
-  the host folds it to stereo. The sound is reported wrong; `MP4_AUDIO_AUX=0` bypasses the Aux round trip for telling
-  the two apart. Open.
+  the host folds it to stereo. The sound was wrong, and clean with the Aux round trip bypassed (`MP4_AUDIO_AUX=0`).
+  The ring trace showed why: the Aux ring holds exactly two renderer frames (2,880 samples for six channels), so the
+  game's DSP code must run between every two consecutive renders, which hardware's fixed 5 ms cadence guarantees;
+  the host rendered frames in bursts whenever its output queue fell below target and overwrote the ring before the
+  game read it. The render thread now keeps one frame per period even when the device asks for more (`audren.c`);
+  with that the game reads and writes a whole frame between every two renders.
 
 Diagnostics added on the way: `MP4_BREAK_AT` and `MP4_BREAK_WATCH` (a log at chosen lifted function entries with the
 arguments and a watched global), the fs trace's open, directory and read lines, the movie decoder's call log. Settings

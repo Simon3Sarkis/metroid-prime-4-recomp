@@ -652,6 +652,16 @@ static void mix_aux(AudioRenderer *r, int mix, const AudrenEffectIn *e) {
     uint8_t *send=ipc_guest(p.send_info,128+(uint64_t)p.capacity*4), *ret=ipc_guest(p.return_info,128+(uint64_t)p.capacity*4);
     uint32_t *sh=(uint32_t *)(send+64),*rh=(uint32_t *)(ret+64); int32_t *sd=(int32_t *)(send+128),*rd=(int32_t *)(ret+128);
     uint32_t wr=sh[1],read=rh[0],total=p.channels*(uint32_t)m->frame;
+    if(rt_trace & RT_TRACE_AUDIO) {   // the rings' cursors: CPU header (read, write, lost, total) and DSP header, send then return
+        static volatile LONG calls;
+        LONG n=InterlockedIncrement(&calls);
+        if(n<=40 || n%1000==0) {
+            const uint32_t *sc=(const uint32_t *)send,*rc=(const uint32_t *)ret;
+            rt_log("audio: aux call %ld: %u ch x %d, capacity %u; send cpu %u/%u/%u/%u dsp %u/%u/%u/%u; return cpu %u/%u/%u/%u dsp %u/%u/%u/%u; return sample %d",
+                   (long)n, p.channels, m->frame, p.capacity, sc[0],sc[1],sc[2],sc[3], sh[0],sh[1],sh[2],sh[3], rc[0],rc[1],rc[2],rc[3], rh[0],rh[1],rh[2],rh[3],
+                   read<p.capacity?rd[read]:0);
+        }
+    }
     for(unsigned c=0;c<p.channels;c++) {
         if(p.input[c]>=r->mixes[mix].buffer_count || p.output[c]>=r->mixes[mix].buffer_count)rt_fatal("auxiliary effect mix buffer");
         float *input=mixbuf(m,m->offset[mix]+p.input[c]),*output=mixbuf(m,m->offset[mix]+p.output[c]);

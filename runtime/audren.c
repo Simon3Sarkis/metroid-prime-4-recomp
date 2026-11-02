@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/audren.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds the voice drop parameter commands.
+// From fe3h-pc-recomp runtime/audren.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds the voice drop parameter commands; one frame per period even when the device asks for more.
 // From totk-pc-recomp runtime/audren.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Adapted from MacNativeGames games/totk/runtime/audio_renderer.c @ b75be8c (MIT, Copyright (c) 2026
 // MacNativeGames contributors). Its voice lifetime (play state, wave buffer release, flush) is ported from
@@ -400,7 +400,16 @@ static DWORD WINAPI render_thread(void *p) {
             continue;
         }
         if (pace == 0) {
-            next = now + frame_ns;   // where the timer goes on if the device stops pacing
+            // The device wants more, still one frame per period: the DSP renders at a fixed cadence and this game's
+            // auxiliary effect ring holds two frames, which its DSP code processes between consecutive renders; a
+            // burst of frames to fill the queue overwrote them before they were read, and the sound came out wrong.
+            if (next > now) {
+                wait_ns(timer, next - now);
+                now = kern_now_ns();
+            } else if (now - next > 100000000ull) {
+                next = now;   // fell far behind (debugger, sleep): resynchronise
+            }
+            next += frame_ns;
         } else {
             if (next > now) wait_ns(timer, next - now);
             else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
