@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/fs_host.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/fs_host.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds GetSaveDataSize with this game's declared save sizes.
 // From totk-pc-recomp runtime/fs_host.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), renamed to fe3h; adds the older SDK calls GetDirectoryEntryCount, CommitSaveData, EnsureSaveData and SetAllocator (FE3H, SDK 6.5.0); logs failed opens with FE3H_TRACE=fs and the backtrace of an invalid close.
 // Adapted from MacNativeGames games/totk/runtime/fs_host.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors); the probe follows MacNativeGames' romfs.c runtime_fs_probe and fs_host.c runtime_save_probe.
@@ -1131,6 +1131,16 @@ static void ov_unmount(Cpu *c) { unmount(arg_p(c, 0)); }
 static void ov_commit(Cpu *c) { ret_x(c, commit(arg_p(c, 0))); }
 // EnsureSaveData(uid): the save's host folder appears with the first mount (mount_save), so there is nothing to make.
 static void ov_ensure_save(Cpu *c) { ret_x(c, 0); }
+// Result GetSaveDataSize(int64_t *size, int64_t *journal, const Uid &) (this game): the sizes the game's control data
+// declares for its user save (10 MiB data, 4 MiB journal, read from control.nacp in Phase 0); the host folder has
+// no quota. Another user has no save (as mount_save answers).
+static void ov_save_data_size(Cpu *c) {
+    int64_t *size = arg_p(c, 0), *journal = arg_p(c, 1);
+    if (!my_uid(arg_p(c, 2))) { ret_x(c, FS_R_TARGET_NOT_FOUND); return; }
+    if (size) *size = 10 << 20;
+    if (journal) *journal = 4 << 20;
+    ret_x(c, 0);
+}
 // SetAllocator: the allocator nn::fs uses for its own buffers; the host keeps none in guest memory.
 static void ov_set_allocator(Cpu *c) { (void)c; }
 static void ov_create_cache(Cpu *c) { ret_x(c, create_cache(I32(0), I64(1), I64(2))); }
@@ -1171,6 +1181,7 @@ static void ov_set_priority(Cpu *c) { (void)c; }
 // Older SDKs (FE3H's 6.5.0): CommitSaveData is Commit by its earlier name.
 #define S_COMMIT_SAVE "_ZN2nn2fs14CommitSaveDataEPKc"
 #define S_ENSURE_SAVE "_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE"
+#define S_SAVE_DATA_SIZE "_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE"
 #define S_SET_ALLOCATOR "_ZN2nn2fs12SetAllocatorEPFPvmEPFvS1_mE"
 #define S_DIR_ENTRY_COUNT "_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE"
 #define S_CREATE_CACHE "_ZN2nn2fs18CreateCacheStorageEill"
@@ -1211,6 +1222,7 @@ HOST_OVERRIDE(S_UNMOUNT, ov_unmount);
 HOST_OVERRIDE(S_COMMIT, ov_commit);
 HOST_OVERRIDE(S_COMMIT_SAVE, ov_commit);
 HOST_OVERRIDE(S_ENSURE_SAVE, ov_ensure_save);
+HOST_OVERRIDE(S_SAVE_DATA_SIZE, ov_save_data_size);
 HOST_OVERRIDE(S_SET_ALLOCATOR, ov_set_allocator);
 HOST_OVERRIDE(S_DIR_ENTRY_COUNT, ov_directory_entry_count);
 HOST_OVERRIDE(S_CREATE_CACHE, ov_create_cache);

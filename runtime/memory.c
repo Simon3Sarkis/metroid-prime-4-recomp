@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; SetHeapSize refuses a size it cannot grant with OutOfMemory.
 // From totk-pc-recomp runtime/memory.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; MapMemory also takes stacks from module data (FE3H).
 // Adapted from MacNativeGames games/totk/runtime/services.c and loader.c @ b75be8c (MIT, Copyright (c) 2026
 // MacNativeGames contributors), and LAS Recomp runtime/main.c and platform/windows.c @ da35b83 (MIT, Copyright (c)
@@ -43,6 +43,7 @@ enum { ATTR_PERMISSION_LOCKED = 16 };
 #define R_OK 0u
 #define R_INVALID_ADDRESS 0xcc01u   // misaligned address
 #define R_INVALID_SIZE 0xca01u
+#define R_OUT_OF_MEMORY 0xd001u    // the kernel's answer to a heap it cannot grow to
 #define R_INVALID_NEW_PERM 0xd801u
 #define R_INVALID_STATE 0xd401u     // InvalidCurrentMemory
 #define R_INVALID_REGION 0xdc01u
@@ -325,11 +326,16 @@ static int overlaps(uint64_t a, uint64_t n, uint64_t b, uint64_t m) { return a <
 static int inside(uint64_t a, uint64_t n, RtRange r) { return a >= r.base && n <= r.size && a - r.base <= r.size - n; }
 
 // ---- 0x01 SetHeapSize
+// A size the heap cannot hold is refused with the kernel's OutOfMemory: the SDK's SetMemoryHeapSize turns
+// OutOfResource, OutOfMemory and LimitReached into its own ResultOutOfMemory and aborts on any other result, and
+// this game's start-up probes the largest heap the kernel grants by binary search between 0 and 8 GiB (nninitStartup
+// in main), so it relies on that clean failure. An unaligned size is the caller's error (InvalidSize).
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
+    if (size % 0x200000) return R_INVALID_SIZE;
     AcquireSRWLockExclusive(&lock);
-    if (size > HEAP_CAP || size % 0x200000 || size + image_bytes() > L.pool) {
+    if (size > HEAP_CAP || size + image_bytes() > L.pool) {
         ReleaseSRWLockExclusive(&lock);
-        return R_INVALID_STATE;
+        return R_OUT_OF_MEMORY;
     }
     if (size > heap_size) commit(L.heap.base + heap_size, size - heap_size, "heap");
     if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");

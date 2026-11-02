@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/ov_system.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/ov_system.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; keeps the requested performance configuration per mode for ov_mp4.c; adds OpenUser, ListAllUsers, ListOpenUsers and ShowUserSelector for this game.
 // From totk-pc-recomp runtime/ov_system.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; adds OpenPreselectedUser (FE3H).
 // Adapted from MacNativeGames games/totk/runtime/services.c (lines 208-302), applet_host.c, account.c, time_host.c and
 // shared_font.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames contributors).
@@ -128,10 +128,15 @@ static void ov_desired_language(Cpu *c) {
 
 static void ov_oe_initialize(Cpu *c) { (void)c; rt_log("oe: application environment: local Windows process"); }
 
+// The configuration last requested per PerformanceMode (0 Normal, 1 Boost), for GetPerformanceConfiguration
+// (ov_mp4.c); before a request, the SDK's defaults (apm: 0x00010000 handheld, 0x00020000 docked).
+uint32_t ov_oe_perf_config[2] = {0x00010000, 0x00020000};
+
 // void SetPerformanceConfiguration(PerformanceMode mode, int config)
 static void ov_performance_config(Cpu *c) {
     int64_t mode = (int32_t)arg_x(c, 0);
     if (mode < 0 || mode > 1) rt_fatal("nn::oe::SetPerformanceConfiguration: invalid mode %lld", (long long)mode);
+    ov_oe_perf_config[mode] = (uint32_t)arg_x(c, 1);
     rt_log("oe: performance request mode %lld configuration %#x: Windows schedules the CPU", (long long)mode,
            (uint32_t)arg_x(c, 1));
 }
@@ -439,6 +444,51 @@ static void ov_open_user(Cpu *c) {
         }
     ReleaseSRWLockExclusive(&account_lock);
     ret_x(c, (uint64_t)ok);
+}
+
+// Result OpenUser(UserHandle *out, const Uid &uid) (this game): the local user by its Uid, as TryOpenPreselectedUser
+// opens it; another Uid is no user.
+static void ov_open_user_by_uid(Cpu *c) {
+    const Uid *u = arg_p(c, 1);
+    int known;
+    AcquireSRWLockExclusive(&account_lock);
+    load_uid();
+    known = u && same_uid(u);
+    ReleaseSRWLockExclusive(&account_lock);
+    if (!known) { ret_x(c, ACCOUNT_R_INVALID); return; }
+    ov_open_user(c);
+    ret_x(c, c->x[0] ? 0 : ACCOUNT_R_INVALID);
+}
+
+// Result ListAllUsers(int *count, Uid *out, int max), ListOpenUsers(int *count, Uid *out, int max) (this game):
+// the one local user, open or not; the game lists the open users at start-up to pick its save.
+static void ov_list_users(Cpu *c) {
+    int32_t *count = arg_p(c, 0);
+    Uid *out = arg_p(c, 1);
+    int64_t max = (int32_t)arg_x(c, 2);
+    if (!count) { ret_x(c, ACCOUNT_R_INVALID); return; }
+    AcquireSRWLockExclusive(&account_lock);
+    load_uid();
+    *count = 0;
+    if (out && max >= 1) {
+        out[0] = local;
+        *count = 1;
+    }
+    ReleaseSRWLockExclusive(&account_lock);
+    ret_x(c, 0);
+}
+
+// Result ShowUserSelector(Uid *out, const UserSelectionSettings &) (this game): the user-selection applet, answered
+// with the local user and no dialog.
+static void ov_show_user_selector(Cpu *c) {
+    Uid *out = arg_p(c, 0);
+    if (!out) { ret_x(c, ACCOUNT_R_INVALID); return; }
+    AcquireSRWLockExclusive(&account_lock);
+    load_uid();
+    *out = local;
+    ReleaseSRWLockExclusive(&account_lock);
+    rt_log("account: user selector answered with the local user");
+    ret_x(c, 0);
 }
 
 // void CloseUser(const UserHandle &)
@@ -858,6 +908,10 @@ static void ov_open_user_result(Cpu *c) {
 }
 HOST_OVERRIDE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", ov_open_user_result);
 HOST_OVERRIDE("_ZN2nn7account9CloseUserERKNS0_10UserHandleE", ov_close_user);
+HOST_OVERRIDE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", ov_open_user_by_uid);
+HOST_OVERRIDE("_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi", ov_list_users);
+HOST_OVERRIDE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", ov_list_users);
+HOST_OVERRIDE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", ov_show_user_selector);
 HOST_OVERRIDE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", ov_user_id);
 HOST_OVERRIDE("_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE", ov_user_existence);
 HOST_OVERRIDE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", ov_nickname);

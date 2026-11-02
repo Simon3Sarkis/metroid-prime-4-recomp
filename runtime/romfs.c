@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/romfs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/romfs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds the SDK 19.3 forms of MountRom and QueryMountRomCacheSize.
 // From totk-pc-recomp runtime/romfs.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/romfs.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -805,4 +805,9 @@ static void ov_initialize(Cpu *c) {
 
 HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKcPvm", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", ov_query_cache);
+// SDK 19.3 (this game) adds an int after the mount name: MountRom(name, int, cache, size) and
+// QueryMountRomCacheSize(out, int). The host reads the image directly and ignores it; the handlers above read only
+// the first argument.
+HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKciPvm", ov_mount_rom);
+HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs24InitializeForApplicationEv", ov_initialize);
