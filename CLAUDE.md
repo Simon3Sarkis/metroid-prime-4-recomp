@@ -67,7 +67,7 @@ samplers, shader image stores tracked). The BC6H light volume's sparse tile shap
 the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). Next: confirm with the user whether the stray glows
 and the occasional green blob are gone, the control buffer write-back if the game turns out to read it, then
 further areas. Test runs: `build/input/newgame.txt`
-with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and F10 (or present
+with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and P (or present
 `MP4_SHOT_RING_AT=<n>`) writes them as PNGs to `MP4_SHOTS_DIR`. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
 `runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
 `runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.

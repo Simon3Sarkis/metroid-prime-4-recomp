@@ -264,8 +264,8 @@ static void box_filter(const uint8_t *px, uint32_t w, uint32_t h, int bgra, uint
 }
 
 // MP4_SHOT_RING=<n> [MP4_SHOTS_DIR=dir]: the last n presents are kept in memory at 800x450 and written as
-// <dir>/ring_f<present>.png when F10 is pressed in the window (gfx_window.c, rt_shot_ring_dump) or at present
-// MP4_SHOT_RING_AT=<present>, for glitches that last a frame: press F10 right after one. Reading each present back
+// <dir>/ring_f<present>.png when P is pressed in the window (gfx_window.c, rt_shot_ring_dump) or at present
+// MP4_SHOT_RING_AT=<present>, for glitches that last a frame: press P right after one. Reading each present back
 // waits for its frame, which costs frame rate while the ring is on. The PNGs are written on a thread of their own.
 #define RING_W 800
 #define RING_H 450
@@ -286,7 +286,7 @@ static void ring_shot(const tex_t *t, uint64_t n) {
             on = 1;
             const char *a = cfg_get("MP4_SHOT_RING_AT");
             at = a && *a ? strtoull(a, NULL, 10) : 0;
-            rt_log("boot: shot ring of %d presents at %dx%d; F10 writes it%s", ring_n, RING_W, RING_H, at ? " (and present MP4_SHOT_RING_AT)" : "");
+            rt_log("boot: shot ring of %d presents at %dx%d; P writes it%s", ring_n, RING_W, RING_H, at ? " (and present MP4_SHOT_RING_AT)" : "");
         }
         parsed = 1;
     }
