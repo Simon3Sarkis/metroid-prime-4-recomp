@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/audio_mixer.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/audio_mixer.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; MP4_AUDIO_AUX=0 bypasses the auxiliary effect.
 // From totk-pc-recomp runtime/audio_mixer.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/audio_mixer.c @ b75be8c (MIT, Copyright (c) 2026 MacNativeGames
 // contributors): the mixing stage (voice decode and resampling, splitters, mixes, effects, sinks) and the IAudioDevice
@@ -629,9 +629,25 @@ static int mix_depth(AudioRenderer *r, int id) { return mix_depth_from(r, id, 0)
 
 /* Guest custom effects exchange int32 samples in two rings. Each ring has CPU and DSP
    0x40-byte headers followed by samples; only the DSP header's owned cursor is advanced. */
+// MP4_AUDIO_AUX=0: the auxiliary effect passes its input through instead of the game's returned samples, for telling
+// the game's own DSP (this game processes its final mix through an Aux effect) from the host's mixing when the
+// sound is wrong.
+static int aux_on(void) {
+    static int v = -1;
+    if (v < 0) v = !cfg_value("MP4_AUDIO_AUX") || strcmp(cfg_value("MP4_AUDIO_AUX"), "0") != 0;
+    return v;
+}
 static void mix_aux(AudioRenderer *r, int mix, const AudrenEffectIn *e) {
     Mixer *m=r->mixer; AudrenAuxParam p; memcpy(&p,e->specific,sizeof p);
     if(!p.send_info || !p.return_info || !p.capacity || !p.channels) return;
+    if(!aux_on()) {
+        for(unsigned c=0;c<p.channels;c++) {
+            if(p.input[c]>=r->mixes[mix].buffer_count || p.output[c]>=r->mixes[mix].buffer_count)rt_fatal("auxiliary effect mix buffer");
+            float *input=mixbuf(m,m->offset[mix]+p.input[c]),*output=mixbuf(m,m->offset[mix]+p.output[c]);
+            if(input!=output)memmove(output,input,m->frame*sizeof(float));
+        }
+        return;
+    }
     if(p.channels>24 || p.capacity>16*1024*1024)rt_fatal("auxiliary effect dimensions");
     uint8_t *send=ipc_guest(p.send_info,128+(uint64_t)p.capacity*4), *ret=ipc_guest(p.return_info,128+(uint64_t)p.capacity*4);
     uint32_t *sh=(uint32_t *)(send+64),*rh=(uint32_t *)(ret+64); int32_t *sd=(int32_t *)(send+128),*rd=(int32_t *)(ret+128);

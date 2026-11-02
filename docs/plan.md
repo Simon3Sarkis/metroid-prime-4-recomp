@@ -75,6 +75,31 @@ the order found, each a host answer to a call the TotK and FE3H games never made
   and `GetTouchScreenStates<16>` are answered at the SDK's detail layer, where ov_input.c replaces the others
   (`ov_mp4.c`). The SDK's vibration player, node and mixer classes run lifted and reach the host's `SendVibrationValue`.
 
+**Into the world (2026-11-02, night):** the game walks its RomFS, opens every area pak and the update's patch pak,
+loads its save, presents frames at 58 fps and plays its intro movie. What stood in the way, in order:
+
+- Paths. The game spells its paths with backslashes and "." components (`rom:\StartupUI.pak`, `rom:\./Worlds`),
+  which Horizon accepts and the host's path code refused; it normalises them at its fs entry now (`fs_host.c`).
+- File handles. The game keeps its open mode in the low three bits of a file handle and masks them off before
+  closing, so handles must be 8-byte aligned like Horizon's pointers; the host's are multiples of 8 now.
+- RomFS directories. The game lists the whole RomFS tree to find its paks (TotK and FE3H never listed it); listings
+  are built from the index (`romfs.c`).
+- The audio renderer's `SetVoiceDropParameter` command (12), which this game sends.
+- Movies. The game plays H.264 in `nn::movie`'s texture mode: the decoder writes into the game's own NVN textures
+  (RGBA8_SRGB, `VIDEO_DECODE`), passed to `GetOutputBuffer` as the buffer's data pointer; the SDK's decoder ran
+  lifted into the NVIDIA driver and aborted. The host decodes with openh264 (BSD, linked statically from MSYS2) and
+  writes the frames through the back end's texel write (`ov_movie.c`, beside TotK's VP9 buffer-mode decoder); in
+  texture mode the game never releases an output index, so the slot is freed after the write. A null decoder stands
+  in for any other type, taking the stream and dropping it so the player reaches its end. The conversion to RGBA is
+  SSE2; a 1080p60 stream decodes in 4 ms, two at once in 15-19 ms, and a few percent of frames drop.
+- Audio. The game's final mix goes through an Aux effect to the game's own DSP code and back, into a 5.1 device sink;
+  the host folds it to stereo. The sound is reported wrong; `MP4_AUDIO_AUX=0` bypasses the Aux round trip for telling
+  the two apart. Open.
+
+Diagnostics added on the way: `MP4_BREAK_AT` and `MP4_BREAK_WATCH` (a log at chosen lifted function entries with the
+arguments and a watched global), the fs trace's open, directory and read lines, the movie decoder's call log. Settings
+reach a Windows process started from WSL only through `WSLENV`.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

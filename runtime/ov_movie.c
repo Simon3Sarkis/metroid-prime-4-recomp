@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/ov_movie.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/ov_movie.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; a decoder the host cannot decode is taken over as a null decoder that drops its stream; decodes H.264 in texture mode with openh264 into the game's NVN textures.
 // From totk-pc-recomp runtime/ov_movie.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/movie_host.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -29,14 +29,20 @@
 #include <emmintrin.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <vpx/vp8dx.h>
 #include <vpx/vpx_decoder.h>
+#include <wels/codec_api.h>
+#include <wels/codec_ver.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "movie.h"
+#include "nvn_api.h"
+#include "nvn_obj.h"
 
 enum { IN_BUFS = 4, IN_CAP = 2 << 20, OUT_BUFS = 8, MAX_MOVIES = 16, VPX_THREADS = 4 };
 enum { ST_OK = 0, ST_ERROR = 0x1000, ST_NULL = 0x100b, ST_NO_OUTPUT = 0x100e, ST_NO_INPUT = 0x1011,
@@ -59,6 +65,14 @@ typedef struct { int index, offset, size; int64_t time; unsigned flags; } Pendin
 typedef struct {
     uint64_t guest;                          // the movie::Decoder object
     int format, configured, started, w, h, eos_in, format_sent, last_error;
+    int unsupported;   // a decoder type or mode the host cannot decode: a null decoder that takes the stream and drops it,
+                       // so the player sees its end and the game goes on
+    int h264;          // H.264 in texture mode (this game's movies): openh264 decodes, the frames go into the game's
+                       // NVN textures as RGBA (get_output); the output buffers hold RGBA frames, not NV12
+    ISVCDecoder *dec;  // openh264, live while h264_live
+    int h264_live;
+    uint8_t *csd;      // the SPS and PPS from the media data, Annex B, fed to the decoder before the stream
+    size_t csd_len;
     uint64_t events;                         // guest DecoderEvents *: EventType * per MOVIE_EV_*
     vpx_codec_ctx_t vpx;
     int vpx_live;
@@ -131,6 +145,8 @@ static void guest_init(void) {
         G.md_set_int32 = need("_ZN5movie9MediaData8SetInt32EPKci");
         G.md_set_rect = need("_ZN5movie9MediaData7SetRectEPKciiii");
         G.md_set_string = need("_ZN5movie9MediaData9SetStringEPKcS2_");
+        G.md_find_buffer = need("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
+        G.buf_size = need("_ZNK5movie6Buffer4SizeEv");
         G.vptr = need("_ZTVN5movie7DecoderE") + 0x10;
         for (int i = 0; i < MOVIE_ENTRIES; i++) G.orig[i] = need(movie_symbols[i]);
         InterlockedExchange(&g_ready, 1);
@@ -184,7 +200,7 @@ static void fire(Cpu *c, const Signals *s) {
     for (int i = 0; i < s->n; i++) rt_call(c, G.signal_event, 1, s->ev[i]);
 }
 
-static int frame_bytes(const Movie *m) { return m->w * m->h + (m->w / 2) * (m->h / 2) * 2; }
+static int frame_bytes(const Movie *m) { return m->h264 ? m->w * m->h * 4 : m->w * m->h + (m->w / 2) * (m->h / 2) * 2; }
 
 // I420 (libvpx) -> packed NV12: Y rows, then rows of interleaved U, V.
 static void to_nv12(const vpx_image_t *img, uint8_t *dst, int w, int h) {
@@ -229,6 +245,80 @@ static void push_decoded(Movie *m, int slot, unsigned flags, int64_t time, int b
     m->decoded[m->ndecoded++] = (Ready){slot, flags, time};
 }
 
+// I420 (openh264) -> RGBA8 for the game's RGBA8_SRGB texture: BT.709 limited range, the HD video default. Eight
+// pixels at a time in 16-bit SSE2 arithmetic with the coefficients scaled by 32 (1.164 -> 37, 1.793 -> 57, 0.213 -> 7,
+// 0.533 -> 17, 2.112 -> 68), which keeps every term inside 16 bits and is within two levels of the exact value; the
+// scalar tail handles a width that is not a multiple of eight. Two rows and two columns share a chroma sample.
+static void rgba_pixel(int y, int d, int e, uint8_t *o) {
+    int c = 37 * (y - 16);
+    int r = (c + 57 * e + 16) >> 5, g = (c - 7 * d - 17 * e + 16) >> 5, b = (c + 68 * d + 16) >> 5;
+    o[0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
+    o[1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
+    o[2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
+    o[3] = 255;
+}
+static void to_rgba(const uint8_t *y, const uint8_t *u, const uint8_t *v, int ys, int uvs, uint8_t *dst, int w, int h) {
+    const __m128i zero = _mm_setzero_si128(), c16 = _mm_set1_epi16(16), c128 = _mm_set1_epi16(128), round = _mm_set1_epi16(16);
+    const __m128i ky = _mm_set1_epi16(37), kr = _mm_set1_epi16(57), kgd = _mm_set1_epi16(7), kge = _mm_set1_epi16(17), kb = _mm_set1_epi16(68);
+    const __m128i alpha = _mm_set1_epi16(255);
+    for (int j = 0; j < h; j++) {
+        const uint8_t *yr = y + (size_t)j * ys, *ur = u + (size_t)(j / 2) * uvs, *vr = v + (size_t)(j / 2) * uvs;
+        uint8_t *o = dst + (size_t)j * w * 4;
+        int i = 0;
+        for (; i + 8 <= w; i += 8) {
+            __m128i Y = _mm_sub_epi16(_mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(yr + i)), zero), c16);
+            __m128i U4 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int32_t *)(ur + i / 2)), zero);   // 4 chroma samples
+            __m128i V4 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int32_t *)(vr + i / 2)), zero);
+            __m128i D = _mm_sub_epi16(_mm_unpacklo_epi16(U4, U4), c128);   // each doubled: two columns share it
+            __m128i E = _mm_sub_epi16(_mm_unpacklo_epi16(V4, V4), c128);
+            __m128i C = _mm_add_epi16(_mm_mullo_epi16(Y, ky), round);
+            __m128i R = _mm_srai_epi16(_mm_add_epi16(C, _mm_mullo_epi16(E, kr)), 5);
+            __m128i G = _mm_srai_epi16(_mm_sub_epi16(_mm_sub_epi16(C, _mm_mullo_epi16(D, kgd)), _mm_mullo_epi16(E, kge)), 5);
+            __m128i B = _mm_srai_epi16(_mm_add_epi16(C, _mm_mullo_epi16(D, kb)), 5);
+            // interleave to RGBA: R,G pairs and B,A pairs as 16-bit lanes, then bytes
+            __m128i rg = _mm_or_si128(_mm_packus_epi16(R, zero), _mm_slli_si128(_mm_packus_epi16(G, zero), 8));   // 8 R then 8 G bytes
+            __m128i ba = _mm_or_si128(_mm_packus_epi16(B, zero), _mm_slli_si128(_mm_packus_epi16(alpha, zero), 8));
+            __m128i rg16 = _mm_unpacklo_epi8(rg, _mm_srli_si128(rg, 8));   // R0 G0 R1 G1 ...
+            __m128i ba16 = _mm_unpacklo_epi8(ba, _mm_srli_si128(ba, 8));   // B0 A0 B1 A1 ...
+            _mm_storeu_si128((__m128i *)(o + 4 * i), _mm_unpacklo_epi16(rg16, ba16));
+            _mm_storeu_si128((__m128i *)(o + 4 * i + 16), _mm_unpackhi_epi16(rg16, ba16));
+        }
+        for (; i < w; i++) rgba_pixel(yr[i], ur[i / 2] - 128, vr[i / 2] - 128, o + 4 * i);
+    }
+}
+
+static int h264_open(Movie *m) {
+    if (WelsCreateDecoder(&m->dec) || !m->dec) return 0;
+    SDecodingParam param;
+    memset(&param, 0, sizeof param);
+    param.uiTargetDqLayer = 255;
+    param.eEcActiveIdc = ERROR_CON_SLICE_COPY;
+    param.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
+    if ((*m->dec)->Initialize(m->dec, &param)) {
+        WelsDestroyDecoder(m->dec);
+        m->dec = NULL;
+        return 0;
+    }
+    // One decoding thread: openh264's thread pool faulted inside the game's Configure call (a write to a low address).
+    m->h264_live = 1;
+    if (m->csd_len) {   // the parameter sets first; they produce no picture
+        unsigned char *planes[3] = {0};
+        SBufferInfo info;
+        memset(&info, 0, sizeof info);
+        (*m->dec)->DecodeFrameNoDelay(m->dec, m->csd, (int)m->csd_len, planes, &info);
+    }
+    return 1;
+}
+
+static void h264_close(Movie *m) {
+    if (m->h264_live) {
+        (*m->dec)->Uninitialize(m->dec);
+        WelsDestroyDecoder(m->dec);
+        m->dec = NULL;
+        m->h264_live = 0;
+    }
+}
+
 static int vpx_open(Movie *m) {
     vpx_codec_dec_cfg_t cfg = {.threads = VPX_THREADS, .w = (unsigned)m->w, .h = (unsigned)m->h};
     if (vpx_codec_dec_init(&m->vpx, vpx_codec_vp9_dx(), &cfg, 0) != VPX_CODEC_OK) return 0;
@@ -242,7 +332,7 @@ static DWORD WINAPI worker(void *arg) {
     Movie *m = arg;
     AcquireSRWLockExclusive(&m->mu);
     for (;;) {
-        while (!m->quit && !(m->started && m->vpx_live && m->npending && can_take(m, &m->pending[0])))
+        while (!m->quit && !(m->started && (m->vpx_live || m->h264_live || m->unsupported) && m->npending && can_take(m, &m->pending[0])))
             SleepConditionVariableSRW(&m->work, &m->mu, INFINITE, 0);
         if (m->quit) break;
         Pending p = m->pending[0];
@@ -259,7 +349,22 @@ static DWORD WINAPI worker(void *arg) {
         const char *bad = NULL;
         m->busy = 1;
         ReleaseSRWLockExclusive(&m->mu);
-        if (p.size > 0) {
+        if (p.size > 0 && m->h264_live) {
+            uint64_t t0 = kern_now_ns();
+            unsigned char *planes[3] = {0};
+            SBufferInfo info;
+            memset(&info, 0, sizeof info);
+            DECODING_STATE ds = (*m->dec)->DecodeFrameNoDelay(m->dec, m->in[p.index] + p.offset, p.size, planes, &info);
+            if (ds != dsErrorFree && ds != dsFramePending) e = VPX_CODEC_ERROR;   // reported below as a decode error
+            if (info.iBufferStatus == 1 && planes[0]) {
+                int pw = info.UsrData.sSystemBuffer.iWidth, ph = info.UsrData.sSystemBuffer.iHeight;
+                if (pw != w || ph != h) bad = "layout";
+                else to_rgba(planes[0], planes[1], planes[2], info.UsrData.sSystemBuffer.iStride[0],
+                             info.UsrData.sSystemBuffer.iStride[1], dst, w, h);
+                got = 1;
+            }
+            dt = kern_now_ns() - t0;
+        } else if (p.size > 0 && !m->unsupported) {   // VP9; the null decoder drops the input: no frame, no error
             uint64_t t0 = kern_now_ns();
             e = vpx_codec_decode(&m->vpx, m->in[p.index] + p.offset, (unsigned)p.size, NULL, 0);
             if (e == VPX_CODEC_OK) {
@@ -282,7 +387,7 @@ static DWORD WINAPI worker(void *arg) {
         if (p.size > 0) {
             m->st.decode_ns += dt;
             if (dt > m->st.max_ns) m->st.max_ns = dt;
-            if (bad) rt_fatal("movie: VP9 frame layout differs from the configured %dx%d I420", w, h);
+            if (bad) rt_fatal("movie: a decoded frame's layout differs from the configured %dx%d", w, h);
             if (e != VPX_CODEC_OK || !got) {
                 m->out_held[slot] = 0;
                 if (e != VPX_CODEC_OK) {
@@ -290,8 +395,8 @@ static DWORD WINAPI worker(void *arg) {
                     m->last_error = ST_ERROR;
                     m->owed |= 1u << MOVIE_EV_ERROR;
                     if (m->st.errors <= 4) {
-                        const char *d = vpx_codec_error_detail(&m->vpx);
-                        rt_log("movie: VP9 decode error on a %d-byte frame at %lld us: %s", p.size, (long long)p.time,
+                        const char *d = m->vpx_live ? vpx_codec_error_detail(&m->vpx) : "openh264 refused the access unit";
+                        rt_log("movie: decode error on a %d-byte frame at %lld us: %s", p.size, (long long)p.time,
                                d ? d : vpx_codec_err_to_string(e));
                     }
                 }
@@ -303,6 +408,10 @@ static DWORD WINAPI worker(void *arg) {
                 }
                 push_decoded(m, slot, 0, p.time, frame_bytes(m));
                 m->st.frames++;
+                if (m->h264 && (m->st.frames <= 20 || m->st.frames % 60 == 0))
+                    rt_log("movie: H.264 frame %llu at %lld us, decode %.1f ms (max %.1f), %llu dropped, %llu handed over",
+                           (unsigned long long)m->st.frames, (long long)p.time, dt / 1e6, m->st.max_ns / 1e6,
+                           (unsigned long long)m->st.dropped, (unsigned long long)m->st.handed);
                 if (m->st.frames % 600 == 0)
                     rt_log("movie: %llu frames, decode %.2f ms per frame (max %.2f)", (unsigned long long)m->st.frames,
                            m->st.decode_ns / 1e6 / (double)m->st.frames, m->st.max_ns / 1e6);
@@ -349,6 +458,7 @@ static void release_codec(Movie *m) {   // m->mu held, worker quiesced
         vpx_codec_destroy(&m->vpx);
         m->vpx_live = 0;
     }
+    h264_close(m);
     for (int i = 0; i < IN_BUFS; i++) {
         if (m->in[i]) mem_kernel_free(m->in[i], IN_CAP);
         m->in[i] = NULL;
@@ -441,16 +551,26 @@ static void ov_ctor(Cpu *c) {
     uint64_t obj = arg_x(c, 0);
     int type = (int)arg_x(c, 1), format = (int)arg_x(c, 2), mode = (int)arg_x(c, 3);
     guest_init();
-    if (type != MOVIE_TYPE_VP9 || mode != MOVIE_MODE_BUFFER || host_off()) {
-        rt_log("movie: decoder type %d mode %d format %d left to the library%s", type, mode, format,
-               host_off() ? " (MP4_MOVIE_HOST=0)" : " (only VP9 in buffer mode runs on the host)");
+    if (host_off()) {
+        rt_log("movie: decoder type %d mode %d format %d left to the library (MP4_MOVIE_HOST=0)", type, mode, format);
         pass(c, MOVIE_CTOR);
         return;
     }
+    int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE;
+    int unsupported = !h264 && (type != MOVIE_TYPE_VP9 || mode != MOVIE_MODE_BUFFER);
+    // The library's decoder would run lifted into the NVIDIA driver (NvRm), which the host does not serve. VP9 in
+    // buffer mode (TotK) and H.264 in texture mode (this game: the decoder writes into the game's own NVN textures)
+    // are decoded on the host; any other decoder is taken over as a null decoder that takes the stream and shows
+    // nothing, so the player runs through to the end of the movie.
+    if (unsupported)
+        rt_log("movie: decoder type %d mode %d format %d: the host decodes VP9 in buffer mode and H.264 in texture mode "
+               "only; a null decoder stands in", type, mode, format);
     Movie *m = calloc(1, sizeof *m);
     if (!m) rt_fatal("movie: decoder allocation");
     m->guest = obj;
     m->format = format;
+    m->unsupported = unsupported;
+    m->h264 = h264;
     InitializeSRWLock(&m->mu);
     InitializeConditionVariable(&m->work);
     InitializeConditionVariable(&m->idle);
@@ -466,8 +586,9 @@ static void ov_ctor(Cpu *c) {
     ReleaseSRWLockExclusive(&g_lock);
     ST64(obj, G.vptr);
     ST64(obj + 8, U(m));
-    rt_log("movie: VP9 decoder %#llx on the host (libvpx %s), output format %d", (unsigned long long)obj,
-           vpx_codec_version_str(), format);
+    rt_log("movie: %s decoder %#llx on the host (libvpx %s, openh264 %d.%d), output format %d",
+           h264 ? "H.264 texture-mode" : unsupported ? "null" : "VP9", (unsigned long long)obj,
+           vpx_codec_version_str(), OPENH264_MAJOR, OPENH264_MINOR, format);
 }
 
 static void destroy(Cpu *c, uint64_t obj) {
@@ -494,6 +615,7 @@ static void destroy(Cpu *c, uint64_t obj) {
     rt_log("movie: decoder %#llx destroyed after %llu frames (%llu dropped to keep time)", (unsigned long long)obj,
            (unsigned long long)m->st.frames, (unsigned long long)m->st.dropped);
     release_codec(m);
+    free(m->csd);
     free(m);
     ST64(obj, G.vptr);   // what the library's destructor leaves (no DecoderImpl)
     ST64(obj + 8, 0);
@@ -511,13 +633,20 @@ static void ov_d0(Cpu *c) {
     pass(c, MOVIE_D0);
 }
 
+// The first calls on a null decoder, logged by name: the player's protocol, for reading its reaction.
+static void note_entry(const Movie *m, const char *name) {
+    if (!m->unsupported && !m->h264) return;
+    static volatile LONG calls;
+    if (InterlockedIncrement(&calls) <= 60) rt_log("movie: null decoder %#llx: %s", (unsigned long long)m->guest, name);
+}
+
 // Status Configure(MediaData *format)
 static void ov_configure(Cpu *c) {
     uint64_t obj = arg_x(c, 0), md = arg_x(c, 1);
     Movie *m = find(obj);
     if (!m) { pass(c, MOVIE_CONFIGURE); return; }
     if (!md) { ret_x(c, ST_NULL); return; }
-    if (m->format != MOVIE_FORMAT_NV12) {
+    if (m->format != MOVIE_FORMAT_NV12 && !m->unsupported && !m->h264) {
         rt_log("movie: output format %d not implemented on the host (NV12 = 4 only)", m->format);
         ret_x(c, ST_UNSUPPORTED);
         return;
@@ -528,7 +657,32 @@ static void ov_configure(Cpu *c) {
     md_find_int32(c, md, "width", &w);
     md_find_int32(c, md, "height", &h);
     const char *mime = (const char *)(uintptr_t)mime_p;
-    if (!mime || strcmp(mime, "video/x-vnd.on2.vp9") || w <= 0 || h <= 0 || w > 8192 || h > 8192 || (w | h) & 1) {
+    uint8_t *csd = NULL;
+    size_t csd_len = 0;
+    if (m->h264) {   // the parameter sets come as "csd-0" (SPS) and "csd-1" (PPS) buffers, Annex B
+        if (!mime || strcmp(mime, "video/avc") || w <= 0 || h <= 0 || w > 8192 || h > 8192 || (w | h) & 1) {
+            rt_log("movie: configure: mime %s %dx%d is not H.264", mime ? mime : "(none)", w, h);
+            ret_x(c, ST_UNSUPPORTED);
+            return;
+        }
+        for (int k = 0; k < 2; k++) {
+            uint64_t b = 0;
+            if (!(uint8_t)rt_call(c, G.md_find_buffer, 3, md, U(k ? "csd-1" : "csd-0"), U(&b)) || !b) continue;
+            const uint8_t *base = (const uint8_t *)(uintptr_t)rt_call(c, G.buf_base, 1, b);
+            uint64_t n = rt_call(c, G.buf_size, 1, b);
+            if (!base || !n || n > 65536) continue;
+            csd = realloc(csd, csd_len + n);
+            if (!csd) rt_fatal("movie: parameter sets");
+            memcpy(csd + csd_len, base, (size_t)n);
+            csd_len += n;
+        }
+        rt_log("movie: H.264 %dx%d, %zu bytes of parameter sets", w, h, csd_len);
+    } else if (m->unsupported) {   // the null decoder takes any stream; its output frames are empty, their size nominal
+        if (w <= 0 || h <= 0 || w > 8192 || h > 8192) w = 1920, h = 1080;
+        w &= ~1, h &= ~1;
+        rt_log("movie: null decoder takes %s %dx%d: input is accepted and dropped, the stream ends with its input",
+               mime ? mime : "(no mime)", w, h);
+    } else if (!mime || strcmp(mime, "video/x-vnd.on2.vp9") || w <= 0 || h <= 0 || w > 8192 || h > 8192 || (w | h) & 1) {
         rt_log("movie: configure: mime %s %dx%d not supported", mime ? mime : "(none)", w, h);
         ret_x(c, ST_UNSUPPORTED);
         return;
@@ -538,7 +692,11 @@ static void ov_configure(Cpu *c) {
     release_codec(m);
     m->w = w;
     m->h = h;
-    if (!vpx_open(m)) rt_fatal("movie: libvpx VP9 decoder initialisation");
+    free(m->csd);
+    m->csd = csd;
+    m->csd_len = csd_len;
+    if (m->h264 && !h264_open(m)) rt_fatal("movie: openh264 decoder initialisation");
+    if (!m->unsupported && !m->h264 && !vpx_open(m)) rt_fatal("movie: libvpx VP9 decoder initialisation");
     for (int i = 0; i < IN_BUFS; i++) m->in[i] = mem_kernel_alloc(IN_CAP, 0x1000);
     for (int i = 0; i < OUT_BUFS; i++)
         if (!(m->out[i] = malloc((size_t)frame_bytes(m)))) rt_fatal("movie: output buffers");
@@ -547,8 +705,9 @@ static void ov_configure(Cpu *c) {
     m->configured = 1;
     m->last_error = 0;
     unlock_back(m, away);
-    rt_log("movie: configured %dx%d VP9, %d input buffers of %d KiB, %d output frames of %d bytes", w, h, IN_BUFS,
-           IN_CAP >> 10, OUT_BUFS, frame_bytes(m));
+    rt_log("movie: configured %dx%d %s, %d input buffers of %d KiB, %d output frames of %d bytes", w, h,
+           m->h264 ? "H.264 (RGBA frames for the game's textures)" : m->unsupported ? "null" : "VP9", IN_BUFS, IN_CAP >> 10,
+           OUT_BUFS, frame_bytes(m));
     ret_x(c, ST_OK);
 }
 
@@ -556,8 +715,9 @@ static void ov_configure(Cpu *c) {
 static void ov_register_events(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_REGISTER_EVENTS); return; }
+    note_entry(m, "RegisterClientEvents");
     AcquireSRWLockExclusive(&m->mu);
-    m->events = arg_x(c, 1);
+    m->events = arg_x(c, 1);   // an unsupported decoder keeps them too: Start raises the error event through them
     ReleaseSRWLockExclusive(&m->mu);
     ret_x(c, ST_OK);
 }
@@ -596,6 +756,7 @@ static void ov_get_output_format(Cpu *c) {
 static void ov_start(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_START); return; }
+    note_entry(m, "Start");
     Signals s = {0};
     AcquireSRWLockExclusive(&m->mu);
     int st = ST_NOT_CONFIGURED;
@@ -614,6 +775,7 @@ static void ov_start(Cpu *c) {
 static void ov_stop(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_STOP); return; }
+    note_entry(m, "Stop");
     AcquireSRWLockExclusive(&m->mu);
     int away = quiesce(m);
     rt_log("movie: stop after %llu frames (%llu dropped to keep time; decode %.2f ms per frame, max %.2f)",
@@ -627,6 +789,7 @@ static void ov_stop(Cpu *c) {
 static void ov_reset(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_RESET); return; }
+    note_entry(m, "Reset");
     AcquireSRWLockExclusive(&m->mu);
     int away = quiesce(m);
     release_codec(m);
@@ -639,6 +802,7 @@ static void ov_reset(Cpu *c) {
 static void ov_flush(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_FLUSH); return; }
+    note_entry(m, "Flush");
     AcquireSRWLockExclusive(&m->mu);
     int away = quiesce(m);
     if (m->configured) {
@@ -656,6 +820,7 @@ static void ov_acquire_input(Cpu *c) {
     int *index = arg_p(c, 1), *remaining = arg_p(c, 2);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_ACQUIRE_INPUT); return; }
+    note_entry(m, "AcquireInputBufferIndex");
     if (!index || !remaining) { ret_x(c, ST_NULL); return; }
     Signals s = {0};
     AcquireSRWLockExclusive(&m->mu);
@@ -680,6 +845,7 @@ static void ov_get_input(Cpu *c) {
     uint64_t buf = arg_x(c, 2);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_INPUT); return; }
+    note_entry(m, "GetInputBuffer");
     if (!buf) { ret_x(c, ST_NULL); return; }
     AcquireSRWLockShared(&m->mu);
     uint8_t *p = index >= 0 && index < IN_BUFS ? m->in[index] : NULL;
@@ -696,6 +862,18 @@ static void ov_send_input(Cpu *c) {
     unsigned flags = (unsigned)arg_x(c, 5);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_SEND_INPUT); return; }
+    note_entry(m, "SendInputBufferForDecode");
+    if (m->unsupported) {   // the null decoder's intake: every 50th packet and the last, with its time
+        static volatile LONG sent;
+        LONG n = InterlockedIncrement(&sent);
+        if (n % 50 == 1 || flags & MOVIE_FLAG_EOS)
+            rt_log("movie: null decoder packet %ld: %d bytes at %lld us, flags %#x", (long)n, size, (long long)time, flags);
+        if (n <= 3 && index >= 0 && index < IN_BUFS && m->in[index] && size > 0) {   // the framing: Annex B start codes or AVCC lengths
+            char hex[3 * 24 + 1] = "";
+            for (int i = 0; i < 24 && i < size; i++) snprintf(hex + 3 * i, 4, "%02x ", m->in[index][offset + i]);
+            rt_log("movie: null decoder packet %ld bytes: %s", (long)n, hex);
+        }
+    }
     if (index < 0 || index >= IN_BUFS || offset < 0 || size < 0 || (int64_t)offset + size > IN_CAP) {
         ret_x(c, ST_ERROR);
         return;
@@ -724,6 +902,7 @@ static void ov_acquire_output(Cpu *c) {
     unsigned *flags = arg_p(c, 3);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_ACQUIRE_OUTPUT); return; }
+    note_entry(m, "AcquireOutputBufferIndex");
     if (!index || !time || !flags || !remaining) { ret_x(c, ST_NULL); return; }
     Signals s = {0};
     AcquireSRWLockExclusive(&m->mu);   // paced frames become ready only at presents (movie_tick)
@@ -747,10 +926,52 @@ static void ov_acquire_output(Cpu *c) {
     ret_x(c, (uint32_t)st);
 }
 
+// Texture mode: the game's Buffer carries the NVNtexture the frame goes into as its data pointer (capacity 8: the
+// game sets the pointer, not a span; it makes the textures with NVN_TEXTURE_FLAGS_VIDEO_DECODE, RGBA8_SRGB, and
+// samples them). The frame is written through the back end's texel write, on the game's thread, as
+// nvnTextureWriteTexels would be. The end-of-stream output carries no frame.
+static int texture_write(Cpu *c, Movie *m, int index, uint8_t *data, uint64_t cap) {
+    const tex_t *t = (const tex_t *)data;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!t || !VirtualQuery(t, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+        t->magic != NVN_TEX_MAGIC) {
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 3)
+            rt_log("movie: texture mode: output buffer %d holds no texture (%p, capacity %llu)", index, (const void *)t,
+                   (unsigned long long)cap);
+        return 0;
+    }
+    int bytes;
+    AcquireSRWLockShared(&m->mu);
+    bytes = index >= 0 && index < OUT_BUFS && m->out_held[index] ? m->out_bytes[index] : -1;
+    ReleaseSRWLockShared(&m->mu);
+    if (bytes < 0) return 0;
+    if (!bytes) return 1;   // the end-of-stream output
+    static volatile LONG seen;
+    if (InterlockedIncrement(&seen) <= 2)
+        rt_log("movie: frame %d into texture %p (%dx%d format %#x flags %#x)", index, (const void *)t, t->d.width, t->d.height,
+               t->d.format, t->d.flags);
+    int w = m->w < t->d.width ? m->w : t->d.width, h = m->h < t->d.height ? m->h : t->d.height;
+    NVNcopyRegion r = {0, 0, 0, w, h, 1};
+    {
+        NVN_BLOCKING();
+        gfx_backend()->write_texels(t, NULL, &r, m->out[index], (uint64_t)m->w * 4, 0);
+    }
+    // In texture mode the frame now lives in the game's texture and the library's buffer is free again: the game
+    // never calls ReleaseOutputBufferIndex for it (it did not for the first eight frames, and the decoder stalled with
+    // every slot held), so the slot is released here.
+    AcquireSRWLockExclusive(&m->mu);
+    m->out_held[index] = 0;
+    WakeConditionVariable(&m->work);
+    ReleaseSRWLockExclusive(&m->mu);
+    return 1;
+}
+
 static int get_output(Cpu *c, Movie *m, int index, uint64_t buf) {
     buf_set_range(c, buf, 0, 0);
     uint8_t *dst = (uint8_t *)(uintptr_t)rt_call(c, G.buf_base, 1, buf);
     uint64_t cap = rt_call(c, G.buf_capacity, 1, buf);
+    if (m->h264 && texture_write(c, m, index, dst, cap)) return ST_OK;
     int st = ST_ERROR, bytes = 0;
     AcquireSRWLockShared(&m->mu);
     if (index >= 0 && index < OUT_BUFS && m->out_held[index]) {
@@ -775,6 +996,7 @@ static void ov_get_output(Cpu *c) {
     uint64_t buf = arg_x(c, 2);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_OUTPUT); return; }
+    note_entry(m, "GetOutputBuffer");
     ret_x(c, buf ? (uint32_t)get_output(c, m, index, buf) : ST_NULL);
 }
 
@@ -783,6 +1005,7 @@ static void ov_get_output_size(Cpu *c) {
     int *size = arg_p(c, 1), *count = arg_p(c, 2);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_OUTPUT_SIZE); return; }
+    note_entry(m, "GetOutputBufferSize");
     if (!size || !count) { ret_x(c, ST_NULL); return; }
     AcquireSRWLockShared(&m->mu);
     *count = 1;
@@ -796,6 +1019,7 @@ static void ov_release_output(Cpu *c) {
     int index = (int)arg_x(c, 1);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_RELEASE_OUTPUT); return; }
+    note_entry(m, "ReleaseOutputBufferIndex");
     Signals s = {0};
     AcquireSRWLockExclusive(&m->mu);
     int st = ST_ERROR;
@@ -818,8 +1042,9 @@ static void ov_release_output(Cpu *c) {
 static void ov_get_last_error(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_LAST_ERROR); return; }
+    note_entry(m, "GetLastError");
     AcquireSRWLockShared(&m->mu);
-    int e = m->last_error;
+    int e = m->last_error;   // an unsupported decoder's: ST_UNSUPPORTED once Start was asked
     ReleaseSRWLockShared(&m->mu);
     ret_x(c, (uint32_t)e);
 }
@@ -839,6 +1064,7 @@ static void ov_get_output_buffer_format(Cpu *c) {
     uint64_t md = arg_x(c, 2);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_OUTPUT_BUFFER_FORMAT); return; }
+    note_entry(m, "GetOutputBufferFormat");
     ret_x(c, md ? (uint32_t)output_format(c, m, index, md) : ST_NULL);
 }
 
@@ -848,6 +1074,7 @@ static void ov_get_output_md(Cpu *c) {
     uint64_t buf = arg_x(c, 2), md = arg_x(c, 3);
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_GET_OUTPUT_MD); return; }
+    note_entry(m, "GetOutputBuffer(md)");
     if (!buf && !md) { ret_x(c, ST_NULL); return; }
     int st = md ? output_format(c, m, index, md) : ST_OK;
     if (st == ST_OK && buf) st = get_output(c, m, index, buf);

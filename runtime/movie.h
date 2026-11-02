@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/movie.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/movie.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; adds the H.264 texture-mode constants and entry points.
 // From totk-pc-recomp runtime/movie.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Adapted from MacNativeGames games/totk/runtime/movie_host.h @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -26,10 +26,12 @@ typedef struct {
     uint64_t md_find_int32, md_find_string, md_set_int32, md_set_rect, md_set_string;
     uint64_t vptr;
     uint64_t orig[MOVIE_ENTRIES];
+    uint64_t md_find_buffer, buf_size;   // H.264 (ov_movie.c): the parameter sets ride in the media data's "csd-0"/"csd-1"
 } MovieGuest;
 
 enum { MOVIE_EV_INPUT, MOVIE_EV_OUTPUT, MOVIE_EV_FORMAT, MOVIE_EV_ERROR };   // DecoderEvents: EventType * per event
-enum { MOVIE_TYPE_VP9 = 3, MOVIE_MODE_BUFFER = 1, MOVIE_FORMAT_NV12 = 4, MOVIE_FLAG_EOS = 4 };
+enum { MOVIE_TYPE_H264 = 1, MOVIE_TYPE_VP9 = 3, MOVIE_MODE_BUFFER = 1, MOVIE_MODE_TEXTURE = 2, MOVIE_FORMAT_NV12 = 4,
+       MOVIE_FLAG_EOS = 4 };
 
 typedef struct { uint64_t frames, decode_ns, max_ns, errors, dropped, handed; } MovieStats;
 
