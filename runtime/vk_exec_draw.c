@@ -1772,6 +1772,10 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             }
             continue;
         }
+        // A stage without resources (this game's transform feedback vertex shaders read attributes only) has nothing
+        // to push: a push of no bytes hands the driver a NULL pData, which it faults on (nvoglv64.dll, found with the
+        // validation layer's VUID-vkCmdPushDescriptorSetWithTemplate-pData-01686).
+        if (i1 == i0 || !dbytes) continue;
         if (s ? info->push1 : info->push) {
             uint32_t n = gfx && push_skip_on() ? dbytes : 0;
             if (n && B.ds_pushed[s] && DS.pn[s] == n && !memcmp(DS.psig[s], ds, n)) {

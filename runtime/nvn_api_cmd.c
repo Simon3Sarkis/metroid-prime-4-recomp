@@ -555,6 +555,26 @@ NVN_API(nvnCommandBufferSetDepthClamp) { REC(cmd_of(c), OP_DEPTH_CLAMP, p_flag)-
 NVN_API(nvnCommandBufferSetRenderEnable) { REC(cmd_of(c), OP_RENDER_ENABLE, p_flag)->value = nvn_arg_bool(c, 1) != 0; }
 // Rasterizer discard runs vertex work without rasterising; with no transform feedback that equals not drawing.
 NVN_API(nvnCommandBufferSetRasterizerDiscard) { REC(cmd_of(c), OP_RASTER_DISCARD, p_flag)->value = nvn_arg_bool(c, 1) != 0; }
+// Transform feedback, which this game sets up in its first gameplay frames: not replayed yet. The bindings and the
+// begin/end/pause/resume calls are accepted and dropped, and DrawTransformFeedback draws nothing, so the draws that
+// would read the captured vertices read nothing. A full replay needs VK_EXT_transform_feedback and the streamout
+// layout of the vertex program's control section. Each entry is logged once.
+static void xfb_note(const char *what) {
+    static volatile LONG said[8];
+    int k = what[0] == 'B' && what[1] == 'i' ? 0 : what[0] == 'B' ? 1 : what[0] == 'E' ? 2 : what[0] == 'P' ? 3 : what[0] == 'R' ? 4 : 5;
+    if (InterlockedIncrement(&said[k]) == 1) rt_log("nvn: transform feedback is not replayed: %s dropped", what);
+}
+// void nvnCommandBufferBindTransformFeedbackBuffer(NVNcommandBuffer *cmd, int index, NVNbufferAddress addr, size_t size)
+NVN_API(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; xfb_note("BindTransformFeedbackBuffer"); }
+// void nvnCommandBufferBindTransformFeedbackBuffers(NVNcommandBuffer *cmd, int first, int n, const NVNbufferRange *r)
+NVN_API(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; xfb_note("BindTransformFeedbackBuffers"); }
+// void nvnCommandBufferBegin/End/Pause/ResumeTransformFeedback(NVNcommandBuffer *cmd, NVNbufferAddress control)
+NVN_API(nvnCommandBufferBeginTransformFeedback) { (void)c; xfb_note("BeginTransformFeedback"); }
+NVN_API(nvnCommandBufferEndTransformFeedback) { (void)c; xfb_note("EndTransformFeedback"); }
+NVN_API(nvnCommandBufferPauseTransformFeedback) { (void)c; xfb_note("PauseTransformFeedback"); }
+NVN_API(nvnCommandBufferResumeTransformFeedback) { (void)c; xfb_note("ResumeTransformFeedback"); }
+// void nvnCommandBufferDrawTransformFeedback(NVNcommandBuffer *cmd, NVNdrawPrimitive mode, NVNbufferAddress control)
+NVN_API(nvnCommandBufferDrawTransformFeedback) { (void)c; xfb_note("DrawTransformFeedback"); }
 // void nvnCommandBufferSetPrimitiveRestart(NVNcommandBuffer *cmd, NVNboolean enable, int index): TOTK draws its
 // terrain and cliff strips with 16-bit indices and restart at 0xffff; the replay applies it per indexed draw (op_draw_idx)
 NVN_API(nvnCommandBufferSetPrimitiveRestart) {
