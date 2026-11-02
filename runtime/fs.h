@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/fs.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/fs.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds the RomFS directory API and the shared DirectoryEntry layout.
 // From totk-pc-recomp runtime/fs.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/fs_host.h @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -28,6 +28,7 @@ enum { FS_ENTRY_DIRECTORY = 0, FS_ENTRY_FILE = 1 };                 // nn::fs::D
 // ---- romfs.c
 // Handles 0x1_0000_0000 + j; host storage uses 0x2_0000_0000 + j (files) and 0x3_0000_0000 + j (directories).
 #define ROMFS_HANDLE_BASE 0x100000000ull
+#define ROMFS_DIR_BASE 0x400000000ull        // RomFS directory handles (romfs.c), multiples of 8 like the rest
 int romfs_owns(const char *path);                          // path is on the mounted RomFS ("<mount>:...")
 int romfs_handle(uint64_t h);                              // h is a RomFS file handle
 uint32_t romfs_mount(const char *name);                    // nn::fs::MountRom; a second name is fatal
@@ -36,6 +37,13 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
 uint32_t romfs_size(int64_t *out, uint64_t h);
 void romfs_close(uint64_t h);
 uint32_t romfs_entry_type(int *out, const char *path);
+// nn::fs::DirectoryEntry: the name, its type (FS_ENTRY_*) and a file's size.
+typedef struct { char name[769]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; int64_t size; } FsDirectoryEntry;
+int romfs_dir_handle(uint64_t h);                          // h is a RomFS directory handle
+uint32_t romfs_open_directory(uint64_t *out, const char *path, int mode);   // nn::fs::OpenDirectoryMode: 1 dirs, 2 files, 3 both
+uint32_t romfs_read_directory(int64_t *count, FsDirectoryEntry *out, uint64_t h, int64_t max);
+uint32_t romfs_directory_entry_count(int64_t *out, uint64_t h);
+void romfs_close_directory(uint64_t h);
 uint64_t romfs_file_count(void);                           // files in the index (fs_init first)
 const char *romfs_entry(uint64_t i, uint64_t *offset, uint64_t *size);   // path, image offset and size of index row i
 const char *romfs_image_path(void);                        // the romfs.bin path fs_init opened

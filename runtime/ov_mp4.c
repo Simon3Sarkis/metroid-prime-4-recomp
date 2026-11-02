@@ -80,3 +80,4 @@ HOST_OVERRIDE("_ZN2nn3hid6detail25GetGyroscopeZeroDriftModeEPNS0_22GyroscopeZero
 HOST_OVERRIDE("_ZN2nn3hid6detail21IsSixAxisSensorAtRestEPbRKNS0_19SixAxisSensorHandleE", ov_six_axis_at_rest);
 HOST_OVERRIDE("_ZN2nn3hid6detail21InitializeTouchScreenEii", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3hid6detail20GetTouchScreenStatesILm16EEENS_6ResultEPiPNS0_16TouchScreenStateIXT_EEEi", ov_touch_states);
+

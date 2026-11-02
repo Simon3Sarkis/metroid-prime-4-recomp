@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/cpu.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/cpu.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; the function-entry hook passes the Cpu.
 // From totk-pc-recomp runtime/cpu.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Adapted from LAS Recomp runtime/cpu.h @ da35b83 (MIT, Copyright (c) 2026 Peiikai).
 // Guest CPU state and helpers used by recompiled code.
@@ -73,8 +73,8 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 extern volatile int g_fnprof;
-void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
-#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
+void fnprof_hit(uint64_t addr, void *cpu);   // cpu: the Cpu of the entered function (main.c: MP4_BREAK_AT)
+#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c); } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
 #define LD16(a) (*(const u16u *)(uintptr_t)(a))

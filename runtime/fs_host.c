@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/fs_host.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds GetSaveDataSize with this game's declared save sizes.
+// From fe3h-pc-recomp runtime/fs_host.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds GetSaveDataSize with this game's declared save sizes; the fs trace logs every open and entry-type query; path arguments take '\\' as a separator and drop "." components, as Horizon does and this game writes; file and directory handles are multiples of 8; RomFS directories go to romfs.c.
 // From totk-pc-recomp runtime/fs_host.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), renamed to fe3h; adds the older SDK calls GetDirectoryEntryCount, CommitSaveData, EnsureSaveData and SetAllocator (FE3H, SDK 6.5.0); logs failed opens with FE3H_TRACE=fs and the backtrace of an invalid close.
 // Adapted from MacNativeGames games/totk/runtime/fs_host.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors); the probe follows MacNativeGames' romfs.c runtime_fs_probe and fs_host.c runtime_save_probe.
@@ -762,9 +762,9 @@ static uint32_t commit(const char *name) {
 
 // ---- files
 static File *file_of(uint64_t h, HANDLE *fh, int *mode) {
-    if (h < FILE_BASE || h >= FILE_BASE + NFILES) return NULL;
+    if (h < FILE_BASE || h >= FILE_BASE + NFILES * 8 || ((h - FILE_BASE) & 7)) return NULL;   // multiples of 8, as romfs.c
     AcquireSRWLockShared(&lock);
-    File *f = &files[h - FILE_BASE];
+    File *f = &files[(h - FILE_BASE) / 8];
     HANDLE v = f->h;
     if (fh) *fh = f->h;
     if (mode) *mode = f->mode;
@@ -809,7 +809,7 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
     for (int i = 0; i < NFILES; i++)
         if (!files[i].h) {
             files[i] = (File){f, mode, save_writer};
-            *out = FILE_BASE + (uint64_t)i;
+            *out = FILE_BASE + (uint64_t)i * 8;
             ReleaseSRWLockExclusive(&lock);
             if (save_writer) {
                 InterlockedIncrement(&save_writers);
@@ -903,9 +903,9 @@ static void close_file(uint64_t h) {
     }
     if (!file_of(h, NULL, NULL)) rt_fatal("fs: close of invalid file handle %#llx", (unsigned long long)h);
     AcquireSRWLockExclusive(&lock);
-    HANDLE f = files[h - FILE_BASE].h;
-    int save = files[h - FILE_BASE].save;
-    files[h - FILE_BASE] = (File){0};
+    HANDLE f = files[(h - FILE_BASE) / 8].h;
+    int save = files[(h - FILE_BASE) / 8].save;
+    files[(h - FILE_BASE) / 8] = (File){0};
     ReleaseSRWLockExclusive(&lock);
     CloseHandle(f);
     if (save) {
@@ -968,7 +968,7 @@ static uint32_t entry_type(int *out, const char *path) {
 }
 
 // ---- directories
-typedef struct { char name[769]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; int64_t size; } DirectoryEntry;
+typedef FsDirectoryEntry DirectoryEntry;   // fs.h
 _Static_assert(sizeof(DirectoryEntry) == 0x310, "nn::fs::DirectoryEntry");
 
 static uint32_t create_directory(const char *path) {
@@ -992,7 +992,7 @@ static uint32_t delete_recursive(const char *path) {
 }
 
 static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
-    if (romfs_owns(path)) rt_fatal("fs: OpenDirectory on the RomFS (%s) is not implemented", path);
+    if (romfs_owns(path)) return romfs_open_directory(out, path, mode);
     char p[PATH_CAP];
     uint32_t r = host_path(path, p, sizeof p);
     if (r) return r;
@@ -1013,7 +1013,7 @@ static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
     for (int i = 0; i < NDIRS; i++)
         if (!dirs[i].find) {
             dirs[i] = (Dir){f, fd, 1, mode, w};
-            *out = DIR_BASE + (uint64_t)i;
+            *out = DIR_BASE + (uint64_t)i * 8;
             ReleaseSRWLockExclusive(&lock);
             return 0;
         }
@@ -1033,9 +1033,10 @@ static int dir_entry_listed(const WIN32_FIND_DATAW *e, int mode) {
 // nn::fs::GetDirectoryEntryCount: every entry read_directory would return from a fresh open, whatever the handle has
 // read so far (the SDK counts with a second directory session, so the read position does not move).
 static uint32_t directory_entry_count(int64_t *out, uint64_t h) {
-    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !out) return FS_R_INVALID_ARGUMENT;
+    if (romfs_dir_handle(h)) return romfs_directory_entry_count(out, h);
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS * 8 || ((h - DIR_BASE) & 7) || !out) return FS_R_INVALID_ARGUMENT;
     AcquireSRWLockShared(&lock);
-    Dir d = dirs[h - DIR_BASE];
+    Dir d = dirs[(h - DIR_BASE) / 8];
     ReleaseSRWLockShared(&lock);
     if (!d.find || !d.pattern) return FS_R_INVALID_ARGUMENT;
     WIN32_FIND_DATAW fd;
@@ -1050,8 +1051,9 @@ static uint32_t directory_entry_count(int64_t *out, uint64_t h) {
 }
 
 static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, int64_t max) {
-    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count || max < 0 || (!out && max)) return FS_R_INVALID_ARGUMENT;
-    Dir *d = &dirs[h - DIR_BASE];
+    if (romfs_dir_handle(h)) return romfs_read_directory(count, out, h, max);
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS * 8 || ((h - DIR_BASE) & 7) || !count || max < 0 || (!out && max)) return FS_R_INVALID_ARGUMENT;
+    Dir *d = &dirs[(h - DIR_BASE) / 8];
     if (!d->find) return FS_R_INVALID_ARGUMENT;
     int64_t n = 0;
     while (n < max) {
@@ -1073,12 +1075,16 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
 }
 
 static void close_directory(uint64_t h) {
-    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !dirs[h - DIR_BASE].find)
+    if (romfs_dir_handle(h)) {
+        romfs_close_directory(h);
+        return;
+    }
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS * 8 || ((h - DIR_BASE) & 7) || !dirs[(h - DIR_BASE) / 8].find)
         rt_fatal("fs: close of invalid directory handle %#llx", (unsigned long long)h);
     AcquireSRWLockExclusive(&lock);
-    HANDLE f = dirs[h - DIR_BASE].find;
-    wchar_t *pattern = dirs[h - DIR_BASE].pattern;
-    dirs[h - DIR_BASE] = (Dir){0};
+    HANDLE f = dirs[(h - DIR_BASE) / 8].find;
+    wchar_t *pattern = dirs[(h - DIR_BASE) / 8].pattern;
+    dirs[(h - DIR_BASE) / 8] = (Dir){0};
     ReleaseSRWLockExclusive(&lock);
     FindClose(f);
     free(pattern);
@@ -1088,9 +1094,32 @@ static void close_directory(uint64_t h) {
 // and ApplicationId are 8-byte structs passed in one register; Uid, ReadOption and WriteOption by reference.
 #define I32(i) ((int32_t)arg_x(c, i))
 #define I64(i) ((int64_t)arg_x(c, i))
+// Horizon's fs takes '\\' as a path separator and drops "." components, and this game spells its paths with both
+// ("rom:\\StartupUI.pak", "rom:\\./Worlds"); the host's path code knows '/' only and refuses ".", so every path argument
+// is copied with its backslashes turned into slashes and its "." components removed first ("rom:/." stays the
+// root, "rom:/"). ".." is still refused further down. A path too long for the buffer is passed as it is and fails
+// the host's own length check.
+static const char *slashed(const char *path, char *buf, size_t cap) {
+    if (!path || (!strchr(path, '\\') && !strstr(path, "/."))) return path;
+    size_t n = strlen(path);
+    if (n >= cap) return path;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        char ch = path[i] == '\\' ? '/' : path[i];
+        if (ch == '.' && k && buf[k - 1] == '/' && (i + 1 == n || path[i + 1] == '/' || path[i + 1] == '\\')) {
+            i++;   // "/." at the end, or "/./": the component goes, with the separator that follows it
+            continue;
+        }
+        buf[k++] = ch;
+    }
+    buf[k] = 0;
+    return buf;
+}
+#define PATH(i, buf) slashed(arg_p(c, i), buf, sizeof buf)
 static void ov_open_file(Cpu *c) {
-    uint32_t r = open_file(arg_p(c, 0), arg_p(c, 1), I32(2));
-    if (r && (rt_trace & RT_TRACE_FS)) {   // a failed open is where the game's error paths start
+    char pb[PATH_CAP];
+    uint32_t r = open_file(arg_p(c, 0), PATH(1, pb), I32(2));
+    if (rt_trace & RT_TRACE_FS) {   // every open, as this game's loader keeps its own request objects (ov_mp4.c)
         char lr[96];
         rt_log("fs: OpenFile(\"%s\", mode %d) -> %#x from %s", (const char *)arg_p(c, 1), I32(2), r,
                ldr_describe(c->x[30] - 4, lr, sizeof lr));
@@ -1107,20 +1136,39 @@ static void ov_close_file(Cpu *c) {
     }
     close_file(h);
 }
-static void ov_entry_type(Cpu *c) { ret_x(c, entry_type(arg_p(c, 0), arg_p(c, 1))); }
+static void ov_entry_type(Cpu *c) {
+    char pb[PATH_CAP];
+    uint32_t r = entry_type(arg_p(c, 0), PATH(1, pb));
+    if (rt_trace & RT_TRACE_FS)
+        rt_log("fs: GetEntryType(\"%s\") -> %#x, type %d", (const char *)arg_p(c, 1), r,
+               arg_p(c, 0) ? *(int32_t *)arg_p(c, 0) : -1);
+    ret_x(c, r);
+}
 static void ov_read_file(Cpu *c) { ret_x(c, read_file(arg_p(c, 0), arg_x(c, 1), I64(2), arg_p(c, 3), arg_x(c, 4))); }
 static void ov_read_options(Cpu *c) { ret_x(c, read_file(arg_p(c, 0), arg_x(c, 1), I64(2), arg_p(c, 3), arg_x(c, 4))); }
 static void ov_read_exact(Cpu *c) { ret_x(c, read_exact(arg_x(c, 0), I64(1), arg_p(c, 2), arg_x(c, 3))); }
 static void ov_write_file(Cpu *c) { ret_x(c, write_file(arg_x(c, 0), I64(1), arg_p(c, 2), arg_x(c, 3), arg_p(c, 4))); }
 static void ov_set_file_size(Cpu *c) { ret_x(c, set_file_size(arg_x(c, 0), I64(1))); }
 static void ov_flush_file(Cpu *c) { ret_x(c, flush_file(arg_x(c, 0))); }
-static void ov_create_file(Cpu *c) { ret_x(c, create_file(arg_p(c, 0), I64(1))); }
-static void ov_delete_file(Cpu *c) { ret_x(c, delete_file(arg_p(c, 0))); }
-static void ov_rename_file(Cpu *c) { ret_x(c, rename_file(arg_p(c, 0), arg_p(c, 1))); }
-static void ov_create_directory(Cpu *c) { ret_x(c, create_directory(arg_p(c, 0))); }
-static void ov_delete_recursive(Cpu *c) { ret_x(c, delete_recursive(arg_p(c, 0))); }
-static void ov_open_directory(Cpu *c) { ret_x(c, open_directory(arg_p(c, 0), arg_p(c, 1), I32(2))); }
-static void ov_read_directory(Cpu *c) { ret_x(c, read_directory(arg_p(c, 0), arg_p(c, 1), arg_x(c, 2), I64(3))); }
+static void ov_create_file(Cpu *c) { char pb[PATH_CAP]; ret_x(c, create_file(PATH(0, pb), I64(1))); }
+static void ov_delete_file(Cpu *c) { char pb[PATH_CAP]; ret_x(c, delete_file(PATH(0, pb))); }
+static void ov_rename_file(Cpu *c) { char pa[PATH_CAP], pb[PATH_CAP]; ret_x(c, rename_file(PATH(0, pa), PATH(1, pb))); }
+static void ov_create_directory(Cpu *c) { char pb[PATH_CAP]; ret_x(c, create_directory(PATH(0, pb))); }
+static void ov_delete_recursive(Cpu *c) { char pb[PATH_CAP]; ret_x(c, delete_recursive(PATH(0, pb))); }
+static void ov_open_directory(Cpu *c) {
+    char pb[PATH_CAP];
+    uint32_t r = open_directory(arg_p(c, 0), PATH(1, pb), I32(2));
+    if (rt_trace & RT_TRACE_FS)
+        rt_log("fs: OpenDirectory(\"%s\", mode %#x) -> %#x", (const char *)arg_p(c, 1), (unsigned)I32(2), r);
+    ret_x(c, r);
+}
+static void ov_read_directory(Cpu *c) {
+    uint32_t r = read_directory(arg_p(c, 0), arg_p(c, 1), arg_x(c, 2), I64(3));
+    if (rt_trace & RT_TRACE_FS)
+        rt_log("fs: ReadDirectory(%#llx, max %lld) -> %#x, %lld entries", (unsigned long long)arg_x(c, 2), (long long)I64(3), r,
+               arg_p(c, 0) ? (long long)*(int64_t *)arg_p(c, 0) : -1);
+    ret_x(c, r);
+}
 static void ov_close_directory(Cpu *c) { close_directory(arg_x(c, 0)); }
 static void ov_directory_entry_count(Cpu *c) { ret_x(c, directory_entry_count(arg_p(c, 0), arg_x(c, 1))); }
 static void ov_mount_save(Cpu *c) { ret_x(c, mount_save(arg_p(c, 0), arg_p(c, 1))); }
@@ -1662,7 +1710,7 @@ static void probe_storage(void) {
 
     // paths
     CHECK(RES(S_CREATE_FILE, U("save:/../x"), 0) == FS_R_INVALID_PATH, "save:/../x");
-    CHECK(RES(S_CREATE_FILE, U("save:/a\\b"), 0) == FS_R_INVALID_PATH, "save:/a\\b");
+    CHECK(RES(S_CREATE_FILE, U("save:/a\\b"), 0) == FS_R_PATH_NOT_FOUND, "save:/a\\b: a backslash separates, and a is no directory");
     CHECK(RES(S_CREATE_FILE, U("save:/a:b"), 0) == FS_R_INVALID_PATH, "save:/a:b");
     CHECK(RES(S_CREATE_FILE, U("save:/a."), 0) == FS_R_INVALID_PATH, "save:/a.");
     CHECK(RES(S_CREATE_FILE, U("nomount:/x"), 0) == FS_R_PATH_NOT_FOUND, "a path on no mount");

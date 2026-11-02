@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/romfs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds the SDK 19.3 forms of MountRom and QueryMountRomCacheSize.
+// From fe3h-pc-recomp runtime/romfs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds the SDK 19.3 forms of MountRom and QueryMountRomCacheSize; file handles are multiples of 8; adds directory listing over the index; the fs trace logs the first reads.
 // From totk-pc-recomp runtime/romfs.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/romfs.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -657,7 +657,11 @@ int romfs_owns(const char *path) {
     return n && path && !strncmp(path, mount_name, n) && path[n] == ':';
 }
 
-int romfs_handle(uint64_t h) { return h > ROMFS_HANDLE_BASE && h < ROMFS_HANDLE_BASE + NH; }
+// Handles are multiples of 8, as a Horizon FileHandle is a pointer: this game keeps its open mode in the low
+// three bits of the handle and masks them off before closing (fs_host.c has the same rule).
+int romfs_handle(uint64_t h) {
+    return h > ROMFS_HANDLE_BASE && h < ROMFS_HANDLE_BASE + NH * 8 && !((h - ROMFS_HANDLE_BASE) & 7);
+}
 
 uint32_t romfs_mount(const char *name) {
     fs_init();
@@ -695,7 +699,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
             handles[j] = i + 1;
             handle_ovl[j] = ov;
             handle_file[j] = f;
-            *out = ROMFS_HANDLE_BASE + j;
+            *out = ROMFS_HANDLE_BASE + j * 8;
             ReleaseSRWLockExclusive(&lock);
             return 0;
         }
@@ -707,7 +711,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
 // the overlay file, or the original's range of the image.
 static int handle_source(uint64_t h, HANDLE *f, uint64_t *base, uint64_t *size) {
     if (!romfs_handle(h)) return 0;
-    uint64_t j = h - ROMFS_HANDLE_BASE;
+    uint64_t j = (h - ROMFS_HANDLE_BASE) / 8;
     AcquireSRWLockShared(&lock);
     uint64_t i = handles[j];
     uint32_t ov = handle_ovl[j];
@@ -730,6 +734,15 @@ static int handle_source(uint64_t h, HANDLE *f, uint64_t *base, uint64_t *size) 
 uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
     HANDLE f;
     uint64_t base, fsize;
+    if (rt_trace & RT_TRACE_FS) {   // the first reads of a run, one line each: which file, where and how much
+        static volatile LONG logged;
+        if (InterlockedIncrement(&logged) <= 4000) {
+            uint64_t j = romfs_handle(h) ? (h - ROMFS_HANDLE_BASE) / 8 : 0;
+            uint64_t i = j ? handles[j] : 0;
+            rt_log("fs: rom read %s offset %lld size %llu", i ? romfs_entry(i - 1, NULL, NULL) : "(bad handle)",
+                   (long long)offset, (unsigned long long)size);
+        }
+    }
     if (!out || offset < 0 || !handle_source(h, &f, &base, &fsize)) return FS_R_INVALID;
     if ((uint64_t)offset > fsize || (!buffer && size)) return FS_R_INVALID;
     uint64_t n = size < fsize - (uint64_t)offset ? size : fsize - (uint64_t)offset, done = 0;
@@ -761,7 +774,7 @@ void romfs_close(uint64_t h) {
     uint64_t base, size;
     if (!handle_source(h, &f, &base, &size))
         rt_fatal("RomFS: close of invalid file handle %#llx", (unsigned long long)h);
-    uint64_t j = h - ROMFS_HANDLE_BASE;
+    uint64_t j = (h - ROMFS_HANDLE_BASE) / 8;
     AcquireSRWLockExclusive(&lock);
     HANDLE of = handle_ovl[j] ? handle_file[j] : INVALID_HANDLE_VALUE;
     handles[j] = 0;
@@ -811,3 +824,131 @@ HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKciPvm", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs24InitializeForApplicationEv", ov_initialize);
+
+// ---- directories. The index lists files; a directory is the set of index paths under "<dir>/", the added files of
+// overlays included. A listing is built when the directory is opened, one entry per direct child in index order
+// (the index is sorted by path, so a subdirectory's files are contiguous), filtered by nn::fs::OpenDirectoryMode, and
+// read from there; GetDirectoryEntryCount reads the whole listing. This game lists the RomFS root at start-up
+// ("rom:/.") to find its paks. Handles are multiples of 8 (romfs_handle).
+#define NDH 64
+typedef struct { FsDirectoryEntry *entries; int64_t count, pos; } DirList;   // entries NULL = free
+static DirList dir_lists[NDH];
+
+int romfs_dir_handle(uint64_t h) {
+    return h > ROMFS_DIR_BASE && h < ROMFS_DIR_BASE + NDH * 8 && !((h - ROMFS_DIR_BASE) & 7);
+}
+
+// "<mount>:/", "<mount>:/." and "<mount>:" name the root (an empty prefix); any other path must be a valid relative
+// one and becomes "<path>/".
+static int dir_prefix(const char *path, char *out, size_t cap) {
+    if (!romfs_owns(path)) return 0;
+    const char *p = path + strlen(mount_name) + 1;
+    while (*p == '/') p++;
+    if (!*p || !strcmp(p, ".")) {
+        out[0] = 0;
+        return 1;
+    }
+    const char *rel = romfs_path_relative(mount_name, path);
+    return rel && snprintf(out, cap, "%s/", rel) < (int)cap;
+}
+
+static int listed_dir(const FsDirectoryEntry *list, int64_t n, const char *name, size_t len) {
+    for (int64_t i = 0; i < n; i++)
+        if (list[i].type == FS_ENTRY_DIRECTORY && strlen(list[i].name) == len && !memcmp(list[i].name, name, len)) return 1;
+    return 0;
+}
+
+// The children of prefix ("" is the root) the mode asks for; FS_R_PATH_NOT_FOUND when nothing lies under it.
+static uint32_t list_directory(const char *prefix, int mode, FsDirectoryEntry **out, int64_t *count) {
+    size_t plen = strlen(prefix);
+    uint64_t total = file_count + nadded;
+    FsDirectoryEntry *list = NULL;
+    int64_t n = 0, cap = 0;
+    int found = plen == 0;
+    for (uint64_t i = 0; i < total; i++) {
+        uint64_t size = 0;
+        const char *path = romfs_entry(i, NULL, &size);
+        if (!path || strncmp(path, prefix, plen)) continue;
+        found = 1;
+        const char *rest = path + plen, *slash = strchr(rest, '/');
+        size_t len = slash ? (size_t)(slash - rest) : strlen(rest);
+        int is_dir = slash != NULL;
+        if (!len || len > 768 || !(mode & (is_dir ? 1 : 2))) continue;
+        if (is_dir && listed_dir(list, n, rest, len)) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 64;
+            list = realloc(list, (size_t)cap * sizeof *list);
+            if (!list) rt_fatal("RomFS: out of memory listing a directory");
+        }
+        memset(&list[n], 0, sizeof list[n]);
+        memcpy(list[n].name, rest, len);
+        list[n].type = is_dir ? FS_ENTRY_DIRECTORY : FS_ENTRY_FILE;
+        list[n].size = is_dir ? 0 : (int64_t)size;
+        n++;
+    }
+    if (!found) {
+        free(list);
+        return FS_R_PATH_NOT_FOUND;
+    }
+    *out = list;
+    *count = n;
+    return 0;
+}
+
+uint32_t romfs_open_directory(uint64_t *out, const char *path, int mode) {
+    fs_trace("romdir", path);
+    char prefix[4096];
+    if (!out || mode < 1 || mode > 3) return FS_R_INVALID;
+    if (!dir_prefix(path, prefix, sizeof prefix)) return FS_R_PATH_NOT_FOUND;
+    FsDirectoryEntry *list;
+    int64_t n;
+    uint32_t r = list_directory(prefix, mode, &list, &n);
+    if (r) return r;
+    AcquireSRWLockExclusive(&lock);
+    for (unsigned j = 1; j < NDH; j++)
+        if (!dir_lists[j].entries) {
+            dir_lists[j] = (DirList){list, n, 0};
+            *out = ROMFS_DIR_BASE + j * 8;
+            ReleaseSRWLockExclusive(&lock);
+            return 0;
+        }
+    ReleaseSRWLockExclusive(&lock);
+    free(list);
+    rt_fatal("RomFS directory handle table full (%d)", NDH);
+}
+
+uint32_t romfs_read_directory(int64_t *count, FsDirectoryEntry *out, uint64_t h, int64_t max) {
+    if (!romfs_dir_handle(h) || !count || max < 0 || (!out && max)) return FS_R_INVALID;
+    AcquireSRWLockExclusive(&lock);
+    DirList *d = &dir_lists[(h - ROMFS_DIR_BASE) / 8];
+    if (!d->entries) {
+        ReleaseSRWLockExclusive(&lock);
+        return FS_R_INVALID;
+    }
+    int64_t n = d->count - d->pos;
+    if (n > max) n = max;
+    if (n > 0) memcpy(out, d->entries + d->pos, (size_t)n * sizeof *out);
+    d->pos += n;
+    ReleaseSRWLockExclusive(&lock);
+    *count = n;
+    return 0;
+}
+
+uint32_t romfs_directory_entry_count(int64_t *out, uint64_t h) {
+    if (!romfs_dir_handle(h) || !out) return FS_R_INVALID;
+    AcquireSRWLockShared(&lock);
+    DirList d = dir_lists[(h - ROMFS_DIR_BASE) / 8];
+    ReleaseSRWLockShared(&lock);
+    if (!d.entries) return FS_R_INVALID;
+    *out = d.count;
+    return 0;
+}
+
+void romfs_close_directory(uint64_t h) {
+    if (!romfs_dir_handle(h)) rt_fatal("RomFS: close of invalid directory handle %#llx", (unsigned long long)h);
+    AcquireSRWLockExclusive(&lock);
+    DirList d = dir_lists[(h - ROMFS_DIR_BASE) / 8];
+    dir_lists[(h - ROMFS_DIR_BASE) / 8] = (DirList){0};
+    ReleaseSRWLockExclusive(&lock);
+    free(d.entries);
+}

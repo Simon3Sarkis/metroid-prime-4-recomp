@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/main.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/main.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds MP4_BREAK_AT, a log at chosen lifted function entries.
 // From totk-pc-recomp runtime/main.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // mp4.exe entry: reserves the guest address space, parses the command line and runs one mode.
 //
@@ -133,7 +133,10 @@ static void log_open(int game) {
     rt_log("log: %s", g_log_path);
 }
 
+static void break_init(void);   // below, with the hook
+
 static void parse_trace(void) {
+    break_init();
     const char *e = cfg_get("MP4_TRACE");   // no default: nothing is traced when unset
     if (!e) return;
     static const struct { const char *name; unsigned bit; } names[] = {
@@ -180,7 +183,96 @@ const RtConfig *rt_config(void) { return &cfg; }
 
 // ---- runtime services the generated code calls (cpu.h)
 volatile int g_fnprof = 0;
-void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr, (void)lr, (void)x0; }
+
+// MP4_BREAK_AT=<module>+0x<offset>[,...] (at most 8): a log line at every entry of those lifted functions with the
+// caller, the argument registers and the first bytes behind x0 and x1 when they point into committed memory, for
+// chasing a bad argument without a debugger. The generated code calls fnprof_hit at every function entry once
+// g_fnprof is set, so this costs a compare per call while it is on. The addresses resolve at the first hit, after
+// the modules are loaded.
+// MP4_BREAK_WATCH=<module>+0x<offset>[,...]: global pointer slots (a GOT entry, a static) whose pointee's first
+// bytes are dumped at every break as well, for an object the broken function reaches through a global.
+#define BREAK_MAX 8
+static struct { char module[16]; uint64_t offset, addr; } g_breaks[BREAK_MAX], g_watches[BREAK_MAX];
+static int g_break_count, g_watch_count;
+static volatile LONG g_break_hits;
+
+static void break_init(void) {
+    const char *e = cfg_get("MP4_BREAK_AT");
+    if (!e || !*e) return;
+    for (const char *p = e; *p && g_break_count < BREAK_MAX;) {
+        size_t n = strcspn(p, ",");
+        const char *plus = memchr(p, '+', n);
+        if (!plus || plus - p >= 16) rt_fatal("MP4_BREAK_AT: '%.*s' is not <module>+0x<offset>", (int)n, p);
+        memcpy(g_breaks[g_break_count].module, p, (size_t)(plus - p));
+        g_breaks[g_break_count].offset = strtoull(plus + 1, NULL, 16);
+        g_break_count++;
+        p += n + (p[n] == ',');
+    }
+    const char *w = cfg_get("MP4_BREAK_WATCH");
+    for (const char *p = w ? w : ""; *p && g_watch_count < BREAK_MAX;) {
+        size_t n = strcspn(p, ",");
+        const char *plus = memchr(p, '+', n);
+        if (!plus || plus - p >= 16) rt_fatal("MP4_BREAK_WATCH: '%.*s' is not <module>+0x<offset>", (int)n, p);
+        memcpy(g_watches[g_watch_count].module, p, (size_t)(plus - p));
+        g_watches[g_watch_count].offset = strtoull(plus + 1, NULL, 16);
+        g_watch_count++;
+        p += n + (p[n] == ',');
+    }
+    g_fnprof = 1;
+}
+
+static int guest_readable(uint64_t a, size_t n) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!a || !VirtualQuery((const void *)(uintptr_t)a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
+    return (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize >= a + n;
+}
+
+static void break_dump(const char *what, uint64_t a, size_t n) {
+    if (!guest_readable(a, n)) return;
+    char line[3 * 64 + 1];
+    for (size_t off = 0; off < n; off += 32) {
+        size_t k = 0;
+        for (size_t i = 0; i < 32 && off + i < n; i++)
+            k += (size_t)snprintf(line + k, sizeof line - k, "%02x ", *(const uint8_t *)(uintptr_t)(a + off + i));
+        rt_log("break:   %s+%#zx: %s", what, off, line);
+    }
+}
+
+void fnprof_hit(uint64_t addr, void *cpu) {
+    const Cpu *c = cpu;
+    static volatile LONG resolved;
+    if (!resolved) {
+        for (int k = 0; k < g_break_count; k++)
+            for (int i = 0; i < ldr_count(); i++)
+                if (!strcmp(ldr_module(i)->name, g_breaks[k].module))
+                    g_breaks[k].addr = ldr_module(i)->base + g_breaks[k].offset;
+        for (int k = 0; k < g_watch_count; k++)
+            for (int i = 0; i < ldr_count(); i++)
+                if (!strcmp(ldr_module(i)->name, g_watches[k].module))
+                    g_watches[k].addr = ldr_module(i)->base + g_watches[k].offset;
+        InterlockedExchange(&resolved, 1);
+    }
+    for (int k = 0; k < g_break_count; k++) {
+        if (addr != g_breaks[k].addr) continue;
+        if (InterlockedIncrement(&g_break_hits) > 4000) return;
+        char at[128], lr[128];
+        rt_log("break: %s from %s: x0 %#llx x1 %#llx x2 %#llx x3 %#llx x4 %#llx x8 %#llx sp %#llx", ldr_describe(addr, at, sizeof at),
+               ldr_describe(c->x[30] - 4, lr, sizeof lr), (unsigned long long)c->x[0], (unsigned long long)c->x[1],
+               (unsigned long long)c->x[2], (unsigned long long)c->x[3], (unsigned long long)c->x[4],
+               (unsigned long long)c->x[8], (unsigned long long)c->sp);
+        break_dump("x0", c->x[0], 192);
+        break_dump("x1", c->x[1], 64);
+        for (int w = 0; w < g_watch_count; w++) {
+            if (!guest_readable(g_watches[w].addr, 8)) continue;
+            uint64_t obj = *(const uint64_t *)(uintptr_t)g_watches[w].addr;
+            char name[40];
+            snprintf(name, sizeof name, "*%s+%#llx=%#llx", g_watches[w].module, (unsigned long long)g_watches[w].offset,
+                     (unsigned long long)obj);
+            break_dump(name, obj, 128);
+        }
+    }
+}
 
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
     char at[128], lr[128];

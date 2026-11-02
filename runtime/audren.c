@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/audren.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/audren.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; adds the voice drop parameter commands.
 // From totk-pc-recomp runtime/audren.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Adapted from MacNativeGames games/totk/runtime/audio_renderer.c @ b75be8c (MIT, Copyright (c) 2026
 // MacNativeGames contributors). Its voice lifetime (play state, wave buffer release, flush) is ported from
@@ -470,6 +470,10 @@ static void renderer_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *r
     case 7: rs->copy[rs->ncopy++] = kern_event_readable(r->event); return;   // QuerySystemEvent
     case 8: r->time_limit = IPC_ARG(rq, uint32_t, 0); return;                // SetRenderingTimeLimit
     case 9: { uint32_t v = r->time_limit ? r->time_limit : 100; IPC_OUT(rs, v); return; }   // GetRenderingTimeLimit
+    // SetVoiceDropParameter(float) / GetVoiceDropParameter (SDK 12.0.0+): the threshold below which the server drops
+    // voices when rendering runs late; the host renders every voice, so the value is only kept.
+    case 12: r->voice_drop = IPC_ARG(rq, float, 0); return;
+    case 13: { float v = r->voice_drop; IPC_OUT(rs, v); return; }
     default: ipc_unimplemented(s, rq);
     }
 }

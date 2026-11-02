@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/cfg.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the prefix length follows the prefix string.
+// From fe3h-pc-recomp runtime/cfg.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the prefix length follows the prefix string; adds MP4_BREAK_AT.
 // From totk-pc-recomp runtime/cfg.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; knows FE3H_THREAD_DUMP.
 // mp4.ini: file-backed defaults for the MP4_* environment variables (docs/controls.md, mp4.ini.example).
 // Format: "key = value" lines, '#' or ';' at the start of a line begins a comment, [sections] only group. A key is a
@@ -38,7 +38,7 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "CLOTH_REALTIME", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
+    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "BREAK_AT", "BREAK_WATCH", "CLOTH_REALTIME", "CORE_DIAG", "CRIT", "CRIT_OUT", "DESC_TEMPLATE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
     "EXEFS", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
     "GPU_INDEX", "GPU_NAME", "HIGHFPS_FIX", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
@@ -81,7 +81,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"BIND_SKIP", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_TEMPLATE", "performance"},
     {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
     {"VK_DYN_VERTEX", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
-    {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
+    {"TRACE", "diagnostics"}, {"BREAK_AT", "diagnostics"}, {"BREAK_WATCH", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
     {"WB_FENCE_LIMIT", "diagnostics"},
 };
 
@@ -130,7 +130,7 @@ static const CfgMeta metas[] = {
     {"VK_VALIDATION", "0", "0|1", RESTART}, {"VK_DYN_VERTEX", "", "0|1", RESTART},
     {"VK_SUBGROUP_PIN", "1", "0|1", RESTART},
     // diagnostics
-    {"TRACE", "", NULL, RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
+    {"TRACE", "", NULL, RESTART}, {"BREAK_AT", "", NULL, RESTART}, {"BREAK_WATCH", "", NULL, RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
     {"WB_FENCE_LIMIT", "65536", "0..1073741824", RESTART},
     {"INPUT_RECORD", "", NULL, RESTART},
 };

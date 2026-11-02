@@ -53,6 +53,28 @@ on, as SDK 19.3 belongs to the 20.5 generation.
 where the host wants its RomFS, whose merge (`tools/extract_romfs.py`: the 27 GB base NCA copied out of the XCI, then
 hactool's BKTR merge with verification) takes most of an hour on this machine.
 
+**Reached (2026-11-02, later):** `--boot` passes: the first `nvnBootstrapLoader` call comes from `main+0xa20f54`,
+the address Phase 0 found, after 170 SVCs, 12 threads and 256 host calls, 3.4 s after the process starts. The RomFS
+merge took 24 min (28.2 GB, 445 files, two more than the base). What stood between the SDK init and that call, in
+the order found, each a host answer to a call the TotK and FE3H games never made:
+
+- `SetHeapSize`: the game's start-up binary-searches the largest heap the kernel grants between 0 and 8 GiB in 2 MiB
+  steps, so it expects a clean failure for a size too large. The SDK's wrapper (sdk+0x1455f0) maps OutOfResource,
+  OutOfMemory and LimitReached to its own ResultOutOfMemory and aborts on any other result; the host answered
+  InvalidCurrentMemory. It now answers OutOfMemory (`memory.c`). The search settles on the application pool
+  (0xCD500000 less the images), the hardware's answer too.
+- `nn::oe::GetPerformanceConfiguration`, lifted, read the apm session the overridden `Initialize` never opened: it now
+  returns the configuration the game last requested per mode (`ov_system.c`, `ov_mp4.c`), and
+  `GetDefaultDisplayResolution` and its change event are answered (1080p docked, 720p handheld; an event that never
+  fires).
+- `nn::fs::MountRom` and `QueryMountRomCacheSize` take an extra `int` in SDK 19.3; the same handlers serve both forms
+  (`romfs.c`). `GetSaveDataSize` answers the control data's 10 MiB save and 4 MiB journal (`fs_host.c`).
+- `nn::account`: the game lists the open users (`ListOpenUsers`), opens one by Uid and can show the user selector; all
+  answer with the host's one local user (`ov_system.c`).
+- `nn::hid`: `SetGyroscopeZeroDriftMode` opened the hid service; it, `IsSixAxisSensorAtRest`, `InitializeTouchScreen`
+  and `GetTouchScreenStates<16>` are answered at the SDK's detail layer, where ov_input.c replaces the others
+  (`ov_mp4.c`). The SDK's vibration player, node and mixer classes run lifted and reach the host's `SendVibrationValue`.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

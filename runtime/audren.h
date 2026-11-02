@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/audren.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/audren.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; adds the voice drop parameter.
 // From totk-pc-recomp runtime/audren.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Adapted from MacNativeGames games/totk/runtime/audio_renderer.h and audio_mixer.h @ b75be8c (MIT, Copyright (c)
 // 2026 MacNativeGames contributors). Wire layouts follow the public libnx audren.h description.
@@ -156,6 +156,7 @@ typedef struct AudioRenderer {
     HANDLE thread;
     volatile long running;
     uint32_t state, revision, time_limit, event;   // state 0 started, 1 stopped; event: writable handle
+    float voice_drop;                              // SetVoiceDropParameter (command 12, SDK 12.0.0+), kept for its getter
     int logged;
     uint64_t behavior_flags, elapsed_frames;
     uint64_t stop_released, empty_played, flushed, logged_released;
