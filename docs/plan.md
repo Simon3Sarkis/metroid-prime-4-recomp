@@ -34,6 +34,25 @@ which is TotK's form again after FE3H's two-callback 6.5.0), the main stack in `
 `tools/build_game.py`, the module bases in `tests/diff/lift.py`, and the window title. `runtime/ov_mp4.c` starts
 empty: no entry of FE3H's `ov_fe3h.c` applies, as `main` imports no network namespace.
 
+**First build (2026-11-02):** `mp4.exe` compiles in 90 s and links; `--selftest` passes (153,616 functions). The
+differential tests pass on this game's code: `tests/diff/lift.py` 24,000 encodings, 71,967 cases, 0 failures;
+`tests/diff/func.py` 410 whole functions, 1,859 cases, 0 failures (run with the Windows venv, as the Linux side has no
+clang). Host probes: `--probe-loader` passes with this game's measured tables; `--probe-kernel`, `--probe-gfx-abi`,
+`--probe-astc`, `--probe-dpi` pass; `--probe-ipc` reaches the SDK client's render loop with the SDK 19.3 heap
+constructor (`sdk+0x217770`) and a fall-back for `GetAudioRendererElapsedFrameCount`, which this game does not
+import; its one failure is the frame period (9.8 ms against 5 ms), which the FE3H build reproduces on this machine,
+whose USB audio device opens with a 480-sample period. `--probe-services` lists the overrides this game does not
+import (`nn::oe` focus and volume calls, `nn::prepo`, `nn::codec` hardware Opus, `nn::swkbd`, mouse and keyboard)
+and those it links but the probe does not exercise; the host's own checks there pass. `tests/excl_mt.py`'s ABA cases
+fail with this machine's clang 23.1.4 on the FE3H tree too, so that is not this port's doing. A pitfall of the rename
+worth recording: the settings code assumed the five-character `FE3H_` prefix in four places (`cfg.c`, `input_map.c`,
+`ui/binds_page.cpp`, `ui/menu.cpp`); the length now follows the prefix string. The TotK-era `RT_V143` switch is pinned
+on, as SDK 19.3 belongs to the 20.5 generation.
+
+`--boot` runs through `nn::init::Start`, `nnosInitialize`, the rtld callback and `nninitInitializeSdkModule`, and stops
+where the host wants its RomFS, whose merge (`tools/extract_romfs.py`: the 27 GB base NCA copied out of the XCI, then
+hactool's BKTR merge with verification) takes most of an hour on this machine.
+
 ## Shared core
 
 As pieces turn out to be identical to fe3h-pc-recomp's (and through it to totk-pc-recomp's), list them here. They are

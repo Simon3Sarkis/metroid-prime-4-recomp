@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/ipc.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/ipc.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the IPC probe's SDK constructor for SDK 19.3 and its fall-back to the SDK's definition of a call main does not import.
 // From totk-pc-recomp runtime/ipc.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/ipc.c @ b75be8c (MIT, Copyright (c) 2026 MacNativeGames
 // contributors). Message framing per libnx sf/hipc.h, cmif.h, tipc.h (ISC), read for the layout only.
@@ -704,9 +704,12 @@ static void probe_unknown_service(void) {
 
 static int revision_number_of(uint32_t rev) { return (int)(rev >> 24) - '0'; }
 
+// A call the game makes goes through main's PLT stub; one it does not import (this game leaves out
+// GetAudioRendererElapsedFrameCount) is called at the SDK's own definition, which is where the stub would land.
 static uint64_t stub(const char *sym) {
     uint64_t a = ldr_plt_stub("main", sym);
-    if (!a) rt_fatal("probe-ipc: no PLT stub for %s in main", sym);
+    if (!a) a = ldr_symbol(sym);
+    if (!a) rt_fatal("probe-ipc: no PLT stub in main and no definition for %s", sym);
     return a;
 }
 
@@ -724,7 +727,9 @@ static void sdk_prepare(Cpu *c) {
     Cpu *again;
     ST32(LD64(c->tpidrro + 0x1F8) + 0x1B0, kern_main_thread(&again));
     const RtLoaded *sdk = ldr_module(2);
-    static const uint64_t ctors_121[] = {0x1dcbd0, 0x1de8a0}, ctors_143[] = {0x221fb0};
+    // SDK 19.3 (this game): the semaphore's constructor is at sdk+0x217770, found as the init_array entry that loads
+    // g_RendererResourceSemaphore's GOT slot (TotK 1.4.3's SDK 20.5 had it at sdk+0x221fb0).
+    static const uint64_t ctors_121[] = {0x1dcbd0, 0x1de8a0}, ctors_143[] = {0x217770};
     const uint64_t *heap_ctors = RT_V143 ? ctors_143 : ctors_121;
     unsigned nctors = RT_V143 ? sizeof ctors_143 / sizeof *ctors_143 : sizeof ctors_121 / sizeof *ctors_121;
     for (unsigned k = 0; k < nctors; k++) {

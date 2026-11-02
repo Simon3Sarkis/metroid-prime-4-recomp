@@ -47,16 +47,21 @@ attribution too: copy the matching rows from fe3h-pc-recomp's `THIRD_PARTY_NOTIC
 
 ## Status
 
-Phase 0 (survey) is done: the answers are in the table in `docs/plan.md`. The dump is at `files/` (ignored) and
-`config.local.toml` points at it. The ExeFS of both versions is in `build/extracted/v0/exefs` (1.0.0) and
-`build/extracted/v131072/exefs` (1.1.0, the target); the FE3H lifter's output for 1.1.0 is in
-`generated/survey-v131072/` (run from `refs/fe3h-pc-recomp/recomp/gen.py`, nothing copied yet). Survey logs are in
-`build/*.log` and `build/logs/`.
+Phase 1 (`docs/plan.md`): the lifter, runtime, tests and build tools are in the tree (copied from
+`refs/fe3h-pc-recomp` @ `47ef991` on 2026-11-02, each file's first line naming its source), `build/xlate/mp4_xlate.exe`
+and `build/v131072/mp4.exe` build, and `--selftest` and `--probe-loader` pass. The dump is at `files/` (ignored),
+`config.local.toml` points at it, the ExeFS of both versions is in `build/extracted/v0/exefs` and
+`build/extracted/v131072/exefs` (1.1.0, the target), the generated C in `generated/v131072/`.
 
-Next is Phase 1 (`docs/plan.md`): copy the lifter, runtime and build tooling from `refs/fe3h-pc-recomp` with
-attribution, adapt `recomp/layout.py` to three modules (`main`, `subsdk0`, `sdk`), extract the update RomFS with
-`tools/extract_romfs.py`, and boot. Expect host work first on the audio renderer's newer effect types, the SVCs the
-FE3H host does not handle, `nn::hid` vibration players, and `nn::oe` performance and resolution calls.
+Build and run from WSL through interop: `.venv-win/Scripts/python.exe tools/build_game.py` (Windows Python, standard
+library only; MSYS2 clang compiles) and `build/v131072/mp4.exe --boot`. The differential tests run with the Windows
+venv too (`.venv-win`, made from `tools/requirements.txt`), as the Linux side has no clang. Survey and run logs go to
+`build/logs/`.
+
+Next: the RomFS (`tools/extract_romfs.py`, then `tools/build_game.py` picks up its index), then `--boot` to the first
+NVN call, then the first frames. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
+`runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
+`runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.
 
 ## Open questions
 

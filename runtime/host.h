@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/host.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/host.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; RT_V143 is always on for this game's SDK generation.
 // From totk-pc-recomp runtime/host.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Interface of the host runtime: guest memory, modules, kernel, IPC, file system and boot.
 //
@@ -183,7 +183,9 @@ extern const int rt_exefs_sha256_count;
 extern const char rt_default_exefs[], rt_default_romfs[], rt_default_profile[];
 extern const int rt_game_version;                          // the game build: 100 (1.0.0) or 110 (1.1.0), build_game.py
 extern const char rt_port_version[];                       // VERSION at the build's root: 0.1.0, 0.1.0+973c626 in a release
-#define RT_V143 (rt_game_version >= 143)
+// TotK's switch between its 1.2.1 SDK and 1.4.3's SDK 20.5; this game's SDK 19.3 is of the newer generation, so the
+// 1.4.3 paths apply to every version of it (the swkbd argument sizes, the IPC probe's SDK set-up).
+#define RT_V143 1
 
 // ---- kernel (kernel.c)
 typedef struct RtThread RtThread;
