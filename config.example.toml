@@ -1,0 +1,16 @@
+# Copy to config.local.toml (ignored by git) and point it at your own files.
+
+[input]
+# Base game as NSP or XCI: the Switch 1 release. Title id believed to be 010019A01E2F2000 (from public listings);
+# tools will verify it from the dump. The Switch 2 release is out of scope.
+base = 'C:\Games\MP4\base.nsp'
+# Cumulative update NSP (title id ending in 800). Target version: see docs/plan.md.
+updates = ['C:\Games\MP4\update.nsp']
+# Add-on content, optional (none is known for this game).
+dlc = []
+# Keys dumped from your own console. Never printed or copied by the tools.
+keys = 'C:\Switch\prod.keys'
+
+[work]
+# Extracted files, generated C and builds go here.
+dir = 'build'

@@ -1,0 +1,85 @@
+@AGENTS.md
+
+# Session guide
+
+## What this project is
+
+A static recompilation of *Metroid Prime 4: Beyond* (Switch 1 release). The game's ARM64 code is lifted to C,
+compiled for x86-64, and linked with a host runtime that stands in for the Switch OS and GPU. Players bring their own
+dump and keys; nothing from the game is ever committed.
+
+The method comes from **totk-pc-recomp**, a working port of *Tears of the Kingdom*. **fe3h-pc-recomp** is the second
+port built on that code, of *Fire Emblem: Three Houses*, and the direct predecessor of this project: it already
+separated the game-independent parts of the TotK port from the TotK-specific ones, and its `docs/plan.md` records
+what broke on a second game and why. This is the third game. The goal is a port, and, along the way, the answer to
+how much of a Switch recomp is shared code that a fourth game gets for free.
+
+## Where to get code from
+
+- `refs/fe3h-pc-recomp/`: the FE3H port at a pinned commit (`tools/fetch_refs.sh`). Take code from here first: it
+  is the TotK code with the first round of game-specific parts removed and the first round of SDK-version differences
+  handled. Cite and attribute it from here, and carry its upstream attributions along (`THIRD_PARTY_NOTICES.md`).
+- `refs/totk-pc-recomp/`: the original. Read `docs/architecture.md` there first; it explains the whole pipeline.
+  Go here when FE3H changed something and the reason does not apply to this game.
+- `CLAUDE.local.md` (ignored) may name local working checkouts with newer changes; read those for the latest state,
+  but attribute copies to the commit they came from.
+
+What is expected to carry over, judging by what carried from TotK to FE3H:
+
+| Part | Where in fe3h-pc-recomp | Expected here |
+|---|---|---|
+| ARM64 lifter, NEON lowering, code generator, NSO loader | `recomp/lifter.py`, `simd_c.py`, `gen.py`, `module.py`, `nso.py`, `flags.py`, `regs.py` | Reuse as is (unchanged from TotK through FE3H) |
+| Jump table recovery | `recomp/jumptables.py`, `tests/jumptables_check.py` | Reuse; re-validate on this game |
+| Module bases | `recomp/layout.py` | Adapt to this game's modules |
+| Differential tests against Unicorn | `tests/diff/` | Reuse |
+| Guest memory, dispatch, loader | `runtime/memory.c`, `dispatch.c`, `loader.c`, `hostfn.c` | Reuse |
+| Horizon host: threads, SVCs, IPC, fs, RomFS, time, audio renderer | `runtime/kernel.c`, `svc.c`, `ipc.c`, `fs_host.c`, `romfs.c`, `audren.c`, `ov_*.c` | Reuse; SDK version differences are the usual trouble (FE3H was 6.5.0, TotK far newer; this game is newer still) |
+| NVN front end and Vulkan back end | `runtime/nvn_*.c`, `vk_*.c`, `tex_*.c` | Reuse if the game uses NVN (Phase 0 decides) |
+| Shader translator (Maxwell to SPIR-V) | `tools/xlate/`, `tools/vendor/ryujinx/`, `runtime/gfx_shader.c` | Reuse if shaders ship as Maxwell code (Phase 0 decides) |
+| Extraction, hactool build, content guard | `tools/extract_exefs.py`, `extract_romfs.py`, `build_hactool.py`, `check_content.py` | Copied already (title id read from the dump) |
+| Installer and release assembly | `installer/`, `tools/make_release.py` | Reuse later, with this game's extraction and language table |
+| Boot checkpoint table, patch tables, FE3H overrides, expected-file tables | `runtime/boot.c` (version table), `recomp/patches-v*.txt`, `runtime/ov_fe3h.c`, `tools/data/expected-*.json` | FE3H only. Do not copy |
+
+totk-pc-recomp is MIT (Copyright (c) 2026 Valiantsin Dzerakh); fe3h-pc-recomp is MIT (Copyright (c) 2026 Jeff Aigner).
+Every copy gets a row in `THIRD_PARTY_NOTICES.md` with the commit, and a header in the file naming the source. The
+upstreams behind them (LASRecomp, MacNativeGames, d2r-mobile, nxnative, Ryujinx's shader translator) keep their
+attribution too: copy the matching rows from fe3h-pc-recomp's `THIRD_PARTY_NOTICES.md` when their code comes along.
+
+## Status
+
+Phase 0 (survey) is done: the answers are in the table in `docs/plan.md`. The dump is at `files/` (ignored) and
+`config.local.toml` points at it. The ExeFS of both versions is in `build/extracted/v0/exefs` (1.0.0) and
+`build/extracted/v131072/exefs` (1.1.0, the target); the FE3H lifter's output for 1.1.0 is in
+`generated/survey-v131072/` (run from `refs/fe3h-pc-recomp/recomp/gen.py`, nothing copied yet). Survey logs are in
+`build/*.log` and `build/logs/`.
+
+Next is Phase 1 (`docs/plan.md`): copy the lifter, runtime and build tooling from `refs/fe3h-pc-recomp` with
+attribution, adapt `recomp/layout.py` to three modules (`main`, `subsdk0`, `sdk`), extract the update RomFS with
+`tools/extract_romfs.py`, and boot. Expect host work first on the audio renderer's newer effect types, the SVCs the
+FE3H host does not handle, `nn::hid` vibration players, and `nn::oe` performance and resolution calls.
+
+## Open questions
+
+Resolved in Phase 0 (details in `docs/plan.md`): the update NSP is the Switch 1 code (a BKTR patch over the Switch 1
+base, NVN and SDK 19.3.15 inside) although its NACP carries the "Nintendo Switch 2 Edition" name; the target is
+1.1.0 = `v131072`; SDK 19.3.13 (base) and 19.3.15 (update); Retro's own engine with `RFRM`/`PACK` archives and zstd;
+NVN with precompiled Maxwell shaders (plus DXBC copies of every shader in the material archive, purpose unknown);
+amiibo through `nn::nfp`, no network namespaces imported by `main`. The Switch 2 build was not extracted or read.
+
+Still open:
+
+- Frame rate: both 1/60 and 1/30 appear as constants in `main`; whether logic assumes 60 fps is a Phase 1 question.
+- The DXBC blobs in `MaterialArchive.arc`: reflection the engine reads, or a toolchain leftover? Decide from how
+  `main` parses the archive before building the shader path.
+- Video codec of the FMVs (inside the paks; `RetroFMV` on top of `nn::movie`).
+- Which of the SVCs the FE3H host lacks (0x13/0x14 shared memory, 0x2F, 0x32, 0x33, 0x40 to 0x45, 0x4B, 0x50 to
+  0x52, 0x70, 0x72) the game actually reaches.
+
+## Environment notes
+
+- The user works in WSL (Linux), where the interpreter is `python3`; `.venv` is a Python 3.12 venv made with uv from
+  `tools/requirements.txt`. FE3H builds its C on Windows with Windows Python and MSYS2 UCRT64 Clang
+  (`tools/build_game.py` there); expect the same here once there is C to build.
+- The sibling checkout `../fe3h-pc-recomp` on this machine is the working FE3H repository; `refs/fe3h-pc-recomp` is
+  the pinned copy to cite.
+- Never commit without the content check passing; never bypass the hook.
