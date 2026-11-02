@@ -127,8 +127,10 @@ typedef struct {
 extern const GfxBackend gfx_null_backend, gfx_vulkan_backend;
 const GfxBackend *gfx_backend(void);                       // MP4_GPU=null|vulkan (default vulkan)
 
-// ---- NVN front end (nvn_procs.c)
+// ---- NVN front end (nvn_procs.c, nvn_api_core.c)
 void nvn_procs_register(void);                             // hostfn_register every proc; before hostfn_seal (ov_gfx.c)
+int nvn_origin_lower_left(void);                           // 1 while the device's window origin is LOWER_LEFT (NVN's
+                                                           // default, this game): window y counts from the bottom row
 uint64_t nvn_proc_address(const char *name);               // synthetic host address of a proc, 0 for an unknown name
 
 // ---- statistics and frames (nvn_api_*.c, vk_*.c; boot.c prints them)

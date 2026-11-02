@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/boot.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; MP4 module list, init_array sizes, main stack, per-version boot checkpoint; nn::init::Start takes three callbacks again, as in TotK's SDK.
+// From fe3h-pc-recomp runtime/boot.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; MP4 module list, init_array sizes, main stack, per-version boot checkpoint; nn::init::Start takes three callbacks again, as in TotK's SDK; shots are turned over for the lower-left window origin.
 // From totk-pc-recomp runtime/boot.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), renamed to fe3h; FE3H module list, init_array sizes, main stack, per-version boot checkpoint, and SDK 6.5.0's two-callback nn::init::Start.
 // Adapted from MacNativeGames games/totk/runtime/loader.c (lines 456-477) and services.c (lines 219-235) @ b75be8cf
 // (MIT, Copyright (c) 2026 MacNativeGames contributors) and LAS Recomp runtime/main.c (lines 16-35, 141-159) @
@@ -208,6 +208,19 @@ void rt_write_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h)
     free(raw);
 }
 
+// A frame read back from the game's texture sits bottom-up with NVN's lower-left window origin (this game;
+// nvn_api_core.c), as the present blit turns it over for the display; the files should read as the screen does.
+void flip_rows(uint8_t *px, uint32_t w, uint32_t h) {
+    if (!nvn_origin_lower_left()) return;
+    uint8_t *tmp = malloc(4ull * w);
+    if (!tmp) rt_fatal("boot: out of memory for a row");
+    for (uint32_t y = 0; y < h / 2; y++) {
+        uint8_t *a = px + 4ull * w * y, *b = px + 4ull * w * (h - 1 - y);
+        memcpy(tmp, a, 4ull * w), memcpy(a, b, 4ull * w), memcpy(b, tmp, 4ull * w);
+    }
+    free(tmp);
+}
+
 static void save_shot(const tex_t *t, const char *path) {
     int fmt = t->d.format;
     int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB;
@@ -221,6 +234,7 @@ static void save_shot(const tex_t *t, const char *path) {
     NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
     gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
+    flip_rows(px, w, h);
     if (bgra)
         for (uint64_t i = 0; i < 4ull * w * h; i += 4) {
             uint8_t x = px[i];
@@ -271,6 +285,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
     NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
     gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
+    flip_rows(px, w, h);
     for (uint32_t y = 0; y < oh; y++)
         for (uint32_t x = 0; x < ow; x++) {
             uint32_t x0 = x * w / ow, x1 = (x + 1) * w / ow, y0 = y * h / oh, y1 = (y + 1) * h / oh;

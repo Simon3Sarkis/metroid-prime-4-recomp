@@ -343,6 +343,7 @@ int vk_sampler_params(int id, samp_par *out);       // parameters of a sampler s
 
 // 8-bit RGBA PNG with stored deflate blocks (boot.c); stops with rt_fatal when the file cannot be written.
 void rt_write_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+void flip_rows(uint8_t *px, uint32_t w, uint32_t h);   // boot.c: reverses the rows with the lower-left window origin
 
 // ---- submission, synchronisation, completion (vk_sync.c, vk_backend.c)
 // Fence values are ctx->timeline values: each submission signals the next one, in submit order. A value counts as done

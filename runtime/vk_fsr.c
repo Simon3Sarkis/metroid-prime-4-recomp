@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_fsr.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_fsr.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the final blit turns the frame over for the lower-left window origin.
 // From totk-pc-recomp runtime/vk_fsr.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // AMD FidelityFX Super Resolution 1 on the present path (gfx_window.c present_image): when the window is larger than
 // the game's output, EASU scales the game's crop rectangle to the swapchain size and RCAS sharpens it, in place of the
@@ -15,6 +15,7 @@
 // The source view of slot s is destroyed when slot s records again: present_image has waited for that slot's fence.
 // The two intermediate images are shared by all slots; each frame's first barrier orders it after the previous
 // frame's reads (one queue, so the barrier covers earlier submissions).
+#include "gfx.h"
 #include "vk.h"
 
 #include <string.h>
@@ -209,8 +210,10 @@ int vk_fsr_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, 
             XF, VK_ACCESS_2_TRANSFER_READ_BIT);
     // later submissions that write the source wait for the compute read
     barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, CS, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+    int y0 = 0, y1 = (int)dh;
+    if (nvn_origin_lower_left()) y0 = (int)dh, y1 = 0;   // bottom-up frame (gfx_window.c present_image says why)
     VkImageBlit region = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                          .srcOffsets = {{0, 0, 0}, {(int)dw, (int)dh, 1}},
+                          .srcOffsets = {{0, y0, 0}, {(int)dw, y1, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .dstOffsets = {{out[0], out[1], 0}, {out[0] + (int)dw, out[1] + (int)dh, 1}}};
     vkCmdBlitImage(cb, F.img[last], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,

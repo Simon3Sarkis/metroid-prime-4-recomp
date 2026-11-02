@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/nvn_api_core.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/nvn_api_core.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the window origin mode is kept as a global (nvn_origin_lower_left) for the back end; this game keeps NVN's lower-left default.
 // From totk-pc-recomp runtime/nvn_api_core.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; the depth mode defaults to NVN's NEAR_IS_MINUS_W.
 // NVN front end, first slice: device, queue, memory pool, buffer, sync and
 // event objects. Ported from MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c @ b75be8cf (MIT,
@@ -52,6 +52,13 @@ uint64_t nvn_fence_last(void) { return __atomic_load_n(&last_fence, __ATOMIC_ACQ
 // gets it. TotK sets NEAR_IS_ZERO at start, so that default went unexercised.
 static int depth_minus_w = 1;
 int nvn_depth_minus_w(void) { return __atomic_load_n(&depth_minus_w, __ATOMIC_RELAXED); }
+// NVN's default window origin is LOWER_LEFT (the GL convention): NDC +y lands on the last memory row of a render
+// target, as GL renders into a texture, and the display turns the window texture over. TotK sets UPPER_LEFT at start
+// (NDC +y at the first row, as D3D and Vulkan); this game keeps the default. Window y is the memory row in both
+// modes, so viewports, scissors, gl_FragCoord and the front face map unchanged; the viewport's orientation
+// (vk_exec_draw.c record_fixed) and the present blit (vk_present_blit) follow the mode.
+static int origin_lower_left = 1;
+int nvn_origin_lower_left(void) { return __atomic_load_n(&origin_lower_left, __ATOMIC_RELAXED); }
 
 void nvn_guest_written(uint64_t addr, uint64_t size) {
     if (size) gfx_backend()->guest_written(addr, size);
@@ -245,14 +252,15 @@ NVN_API(nvnDeviceInstallDebugCallback) {
 NVN_API(nvnDeviceSetWindowOriginMode) {
     uint32_t m = (uint32_t)arg_x(c, 1);
     ((dev_t_ *)arg_p(c, 0))->origin = m;
-    NVN_LOG("window origin %s", m ? "upper left (as D3D and Vulkan)" : "lower left (GL)");
+    __atomic_store_n(&origin_lower_left, m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT, __ATOMIC_RELAXED);
+    rt_log("nvn: window origin %s", m ? "upper left (as D3D and Vulkan)" : "lower left (GL)");
 }
 // void nvnDeviceSetDepthMode(NVNdevice *d, NVNdepthMode mode)
 NVN_API(nvnDeviceSetDepthMode) {
     uint32_t m = (uint32_t)arg_x(c, 1);
     ((dev_t_ *)arg_p(c, 0))->depth_mode = m;
     __atomic_store_n(&depth_minus_w, m == NVN_DEPTH_MODE_NEAR_IS_MINUS_W, __ATOMIC_RELAXED);
-    NVN_LOG("depth mode %s", m ? "near is 0 (as D3D and Vulkan)" : "near is -w (GL): vertex shaders map z to (z+w)/2");
+    rt_log("nvn: depth mode %s", m ? "near is 0 (as D3D and Vulkan)" : "near is -w (GL)");
 }
 // void nvnDeviceFinalizeCommandHandle(NVNdevice *d, NVNcommandHandle h)
 NVN_API(nvnDeviceFinalizeCommandHandle) { (void)c; }
@@ -480,7 +488,12 @@ NVN_API(nvnQueueFenceSync) {
 NVN_API(nvnSyncWait) {
     const sync_t *s = arg_p(c, 0);
     uint64_t timeout = arg_x(c, 1);
-    if (!s->fenced) { ret_x(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED); return; }
+    if (!s->fenced) {
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 3) rt_log("nvn: SyncWait on a sync never fenced: timeout at once");
+        ret_x(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        return;
+    }
     const GfxBackend *b = gfx_backend();
     if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
     int ok;
@@ -489,6 +502,27 @@ NVN_API(nvnSyncWait) {
         ok = b->fence_wait(s->fence, timeout);
     }
     if (ok) b->cpu_synced(s->fence);
+    else if (timeout) {
+        // A blocking wait that gave up: on hardware such waits (the game's frame throttle, say) end in time; here a
+        // GPU far behind (pipeline builds) lets the CPU run on, which this game's timer-query pool does not survive.
+        static volatile LONG said;
+        if (InterlockedIncrement(&said) <= 20)
+            rt_log("nvn: SyncWait(%p, fence %llu, timeout %llu ns) timed out: fence_done %llu, newest submit %llu",
+                   (const void *)s, (unsigned long long)s->fence, (unsigned long long)timeout,
+                   (unsigned long long)b->fence_done(), (unsigned long long)nvn_fence_last());
+    } else {
+        // A poll (timeout 0) that keeps failing on the same fence means the GPU stopped completing submits while the
+        // CPU goes on: this game's GPU-progress counter (main+0xbb880 polls its syncs in order) then stops and its
+        // timer-query pool drains, which ends in a crash. Say so once the same fence has been polled 120 times.
+        static const sync_t *last_s;
+        static uint64_t last_f;
+        static int polls;
+        if (last_s == s && last_f == s->fence) polls++;
+        else last_s = s, last_f = s->fence, polls = 1;
+        if (polls == 8 || polls == 120)
+            rt_log("nvn: SyncWait(%p, fence %llu) timed out %d times: fence_done %llu, newest submit %llu", (const void *)s,
+                   (unsigned long long)s->fence, polls, (unsigned long long)b->fence_done(), (unsigned long long)nvn_fence_last());
+    }
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
 }
 // void nvnEventBuilderSetDefaults(NVNeventBuilder *b)

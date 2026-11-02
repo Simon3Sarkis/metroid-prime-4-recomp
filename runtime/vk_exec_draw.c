@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the viewport orientation follows the window origin mode.
 // From totk-pc-recomp runtime/vk_exec_draw.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; separable programs: BindProgram with a subset of stages (FE3H); bound handles become pool slots (FE3H uses several descriptor pools).
 // Draws, binds and dispatches of the Vulkan op-stream replay: the strong
 // vk_exec_op_draw behind vk_exec.c's weak hook. The bind ops fill the VkExec slots; a draw opens the pass, resolves the
@@ -1852,7 +1852,13 @@ static void record_fixed(VkExec *ex) {
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
         if (w < 1) w = 1;
         if (h < 1) h = 1;
-        VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
+        // Window y is the memory row in both NVN origin modes; they differ in where NDC +y lands. Upper-left (TotK):
+        // at window y 0, the first row, so the viewport gets a negative height, which is how Vulkan puts NDC +y at the
+        // first row. Lower-left (NVN's default, this game): at the last row, as GL renders into a texture, so the
+        // viewport keeps Vulkan's own orientation; the picture then sits bottom-up in memory, which the game's
+        // texture reads expect and the present blit turns over (vk_present_blit).
+        VkViewport v = nvn_origin_lower_left() ? (VkViewport){x, y, w, h, ex->depth_range[0], ex->depth_range[1]}
+                                               : (VkViewport){x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};
         vkCmdSetViewportWithCount(cb, 1, &v);
         ex->recorded++;
     }

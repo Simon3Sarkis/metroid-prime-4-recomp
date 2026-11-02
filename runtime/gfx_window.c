@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/gfx_window.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the window class and title name this port.
+// From fe3h-pc-recomp runtime/gfx_window.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the window class and title name this port; the present blit turns the frame over for the lower-left window origin.
 // From totk-pc-recomp runtime/gfx_window.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Win32 window, Vulkan surface and swapchain, present blit, 60 Hz vsync thread, focus.
 // Swapchain set-up ported from LAS Recomp, runtime/nvn/vulkan/device.c:254-330 (https://github.com/peiikai/LASRecomp @
@@ -895,8 +895,12 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         if (general)   // a GENERAL source (vk_texture.c images): earlier submissions' writes become visible to the blit here
             sync_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                          VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        // NVN's lower-left window origin (nvn_api_core.c): the frame sits bottom-up in memory and the display turns
+        // it over, which the blit does by reading the rows in reverse (a negative source extent).
+        int y0 = cy, y1 = cy + ch;
+        if (nvn_origin_lower_left()) y0 = cy + ch, y1 = cy;
         VkImageBlit region = {
-            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
+            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{cx, y0, 0}, {cx + cw, y1, 1}},
             .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{to[0], to[1], 0}, {to[0] + to[2], to[1] + to[3], 1}}};
         vkCmdBlitImage(cb, src, general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
