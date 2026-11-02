@@ -133,10 +133,14 @@ static uint64_t layer_bytes(const nvn_texdesc *d, unsigned dpl, int layered,
 /* A sparse texture (NVN_TEXTURE_FLAGS_SPARSE) is laid out so that a row of eight blocks is one 64 KiB tile, the unit
    its pages are mapped in (nvn_api_obj.c sparse_layout gives the game the tile sizes). The block height (and depth,
    for 3D) follow from the tile shape per bytes per block: 2D tiles 256x256 (1 byte), 256x128 (2), 128x128 (4),
-   128x64 (8), 64x64 (16) blocks; 3D tiles 64x64x16 (1), 64x32x16 (2), 32x32x16 (4), 64x16x16 (8), 32x8x16 (16).
+   128x64 (8), 64x64 (16) blocks; 3D tiles 64x64x16 (1), 64x32x16 (2), 32x32x16 (4), 64x16x16 (8), 16x16x16 (16).
+   The 16-byte 3D shape is not the 32x8x16 the aspect rule would give: the game's BC6H light volumes (384x192x528
+   blocks of 16 bytes) only decode coherently with blocks 2 GOBs high, so their tile is 16 blocks wide (found by
+   comparing frame dumps, MP4_SPARSE_TILES=1,4 against the default). nvn_api_obj.c sparse_layout still reports the
+   aspect rule's shape; the game's mappings matched either way.
    MP4_SPARSE_TILES=<log2 GOBs>,<log2 depth> overrides, for finding the hardware's choice from the game's data. */
 static void sparse_tiles(int bpb, unsigned dpl, unsigned *tileH, unsigned *tileD) {
-    static const unsigned h2[5] = {5, 4, 4, 3, 3}, h3[5] = {3, 2, 2, 1, 0};
+    static const unsigned h2[5] = {5, 4, 4, 3, 3}, h3[5] = {3, 2, 2, 1, 1};
     int k = bpb <= 1 ? 0 : bpb <= 2 ? 1 : bpb <= 4 ? 2 : bpb <= 8 ? 3 : 4;
     unsigned th = dpl == 3 ? h3[k] : h2[k], td = dpl == 3 ? 4 : 0;
     const char *e = cfg_get("MP4_SPARSE_TILES");

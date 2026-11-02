@@ -583,10 +583,14 @@ static void xfb_note(const char *what) {
                 n += (size_t)snprintf(line + n, sizeof line - n, " %x=%x", o, v);
             }
             rt_log("nvn: transform feedback begin: program %p stage %u control (%p):%s", (const void *)p, i, (const void *)ctl, line);
-            if (i == 0) {   // the vertex stage's tail bytes in full, zeros included (a selector list may be mostly zero)
-                char hex[3 * 0x180 + 1];
-                for (int o = 0; o < 0x180; o++) snprintf(hex + 3 * o, 4, "%02x ", ctl[0x700 + o]);
-                rt_log("nvn: transform feedback vertex control 0x700..0x880: %s", hex);
+            if (i == 0) {   // the vertex stage's bytes past the 0x880 fields, in rows of 64: dword 0x6f8 names 0xe90 for
+                // a vertex program with streamout against 0x790 for its fragment stage, so the streamout layout (the
+                // Maxwell varying selectors, bytes 0x28.. per captured component) may follow the usual section
+                for (int o = 0x880; o < 0xe90; o += 64) {
+                    char hex[3 * 64 + 1];
+                    for (int j = 0; j < 64; j++) snprintf(hex + 3 * j, 4, "%02x ", ctl[o + j]);
+                    rt_log("nvn: transform feedback vertex control %#x: %s", o, hex);
+                }
             }
         }
     }

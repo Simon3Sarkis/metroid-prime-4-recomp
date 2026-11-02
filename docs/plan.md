@@ -165,6 +165,15 @@ the null decoder). No host AAC decoder needed.
   height (2 GOBs) and depth (16) were confirmed by decoding the dumped pages under every candidate and scoring the
   smoothness of neighbouring blocks (`MP4_DUMP_VPOOL` writes them). Mappings from physical pools into a shadowed pool
   are not supported.
+- The BC6H volume (the HDR light volume the fog scattering and the ambient lighting read) was still laid out with the
+  tile shape the aspect rule gives 16-byte blocks (32x8x16, block height one GOB), and its pages decoded as striped
+  garbage: the fog scattering slices showed the stripes, the scene stayed dark, stray glows crossed the sky now and
+  then, and the arm cannon rendered black (its lighting comes from that volume). Two dumps of the same frame, the
+  default against `MP4_SPARSE_TILES=1,4`, settled it: the volume decodes coherently with blocks two GOBs high, so its
+  tile is 16x16x16 blocks (`nvn_tex.c sparse_tiles`). The page scoring that confirmed the BC1 layout had not been
+  conclusive for BC6H. With that the cannon is lit and the scene brighter; the tone mapper's exposure (the first
+  float of its c3 block, 0.031 at frame 7200 with `MP4_DUMP_UBO=1`) is live, fed by the 1x1 luminance reduction,
+  two vertex-shader passes over storage buffers and a 64-byte copy the CPU reads back.
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).
