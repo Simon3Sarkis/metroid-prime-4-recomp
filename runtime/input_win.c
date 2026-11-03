@@ -14,6 +14,7 @@
 #include <SDL3/SDL.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "input.h"
 #include "input_map.h"
@@ -50,6 +51,8 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
 };
 
 // MP4_INPUT_SCRIPT=<file>: lines "<frame> <button> [hold]" or "<frame> LSTICK|RSTICK <x> <y> [hold]", ORed into the real input.
+// Two lines act on the host instead: "<frame> SHOT" writes the shot ring (MP4_SHOT_RING, as the P key does) and
+// "<frame> DUMP" arms a frame dump two presents later (MP4_DUMP=when), for a scripted look at a scene.
 // <frame> and its hold are 60 Hz ticks of game time since the first present (frame_step_ticks: presents at 60 fps), so
 // the title menus get the presses at the same game time at any frame limit. A line "@<ms> ..." is timed instead: <ms>
 // and its hold are milliseconds of the world clock (frame_step_world_us, game time since the loaded save's first
@@ -57,7 +60,7 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
 // applied once. In a script with timed lines (a recording) the untimed ones belong before the world clock: they stop
 // when it starts, as the load ends at another tick in each run.
 // at, hold: ticks, or microseconds of the world clock when timed.
-typedef struct { uint64_t at, hold; int bit, stick, timed; int32_t x, y; int logged; char text[48]; } ScriptEv;
+typedef struct { uint64_t at, hold; int bit, stick, timed, host; int32_t x, y; int logged; char text[48]; } ScriptEv;   // host: 1 SHOT, 2 DUMP
 static const struct { const char *name; int bit; } script_buttons[] = {
     {"A", B_A}, {"B", B_B}, {"X", B_X}, {"Y", B_Y}, {"LCLICK", B_STICK_L}, {"RCLICK", B_STICK_R}, {"L", B_L}, {"R", B_R},
     {"ZL", B_ZL}, {"ZR", B_ZR}, {"PLUS", B_PLUS}, {"MINUS", B_MINUS}, {"LEFT", B_LEFT}, {"UP", B_UP}, {"RIGHT", B_RIGHT}, {"DOWN", B_DOWN},
@@ -93,6 +96,9 @@ static void script_load(void) {
             e.stick = name[0] == 'L' ? 1 : 2; e.x = (int32_t)a; e.y = (int32_t)b;
             if (n >= 3 && c > 0) e.hold = (uint64_t)(c * unit + 0.5);
             snprintf(e.text, sizeof e.text, "%s %d %d", name, e.x, e.y);
+        } else if (!strcmp(name, "SHOT") || !strcmp(name, "DUMP")) {
+            e.host = name[0] == 'S' ? 1 : 2;
+            snprintf(e.text, sizeof e.text, "%s", name);
         } else {
             for (size_t i = 0; i < sizeof script_buttons / sizeof *script_buttons; i++)
                 if (!strcmp(name, script_buttons[i].name)) e.bit = script_buttons[i].bit;
@@ -127,7 +133,11 @@ static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
             if (e->timed) rt_log("input: script frame %llu at %.1f ms: %s", (unsigned long long)fr, w / 1000.0, e->text);
             else rt_log("input: script frame %llu tick %llu: %s", (unsigned long long)fr, (unsigned long long)tick, e->text);
         }
-        if (e->stick) { int32_t *s = e->stick == 1 ? sl : sr; s[0] = e->x; s[1] = e->y; }
+        if (e->host) {
+            if (e->host == 1) rt_shot_ring_dump();
+            else vk_dump_arm(fr + 2);
+            e->at = UINT64_MAX - e->hold;   // once
+        } else if (e->stick) { int32_t *s = e->stick == 1 ? sl : sr; s[0] = e->x; s[1] = e->y; }
         else *b |= 1ull << e->bit;
     }
 }

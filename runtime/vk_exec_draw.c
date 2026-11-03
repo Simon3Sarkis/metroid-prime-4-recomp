@@ -1630,6 +1630,7 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
             } else if ((b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) && b->type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER &&
                        b->type != VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
                 int img = b->kind == GFX_RES_IMG, cap = img ? 32 : 128;
+                if (r->cbuf_slot >= 3) ok = 0;   // handles in a uniform block (cbuf_handle): its bytes are not compared
                 for (uint32_t k = 0; k < cnt; k++) {
                     int slot = r->slot + (int)k;
                     if (slot >= 0 && slot < cap) rs_add(tmp, &n, ex, img ? &ex->img[st][slot] : &ex->tex[st][slot], 8);
@@ -1716,6 +1717,24 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // graphics push equal to the last one at its set number, with no other layout or bind between, is not recorded.
 // The descriptors go into one packed array d, a VkDescSlot per descriptor in binding order, which a set's update
 // template reads directly (VkPipeInfo.tpl); write structs are filled only when a set has no template.
+// A texture or image the shader takes by a handle in a user uniform block (cbuf_slot 3 and up; Ryujinx names it
+// <stage>_t<type>_cb<slot>_<offset>, usually an array indexed by data, such as the cookie textures of this game's
+// light list in its fog pass): element k is the 64-bit handle at byte offset * 4 + 8 k of the block bound to that slot,
+// as the submission's snapshot of it holds (vk_usnap.c), else guest memory. 0 when it lies outside the binding. Before,
+// such a resource got slot -1 (gfx_shader.c handle_slot) and element k the texture bound to slot k - 1: the morph
+// ball's light sampled the depth buffer for its cookie, and the fog over its screen tiles turned dark.
+static uint64_t cbuf_handle(const VkExec *ex, int st, const GfxShaderRes *r, uint32_t k) {
+    if (r->cbuf_slot < 3 || r->cbuf_slot - 3 >= 18) return 0;
+    const p_bind_buf *u = &ex->ubo[st][r->cbuf_slot - 3];
+    uint64_t off = (uint64_t)(r->handle & 0x3fff) * 4 + (uint64_t)k * 8, h = 0;
+    if (!u->addr || off + 8 > u->size) return 0;
+    const void *p = vk_usnap_peek(u->addr + off, 8);
+    VkMemSpan sp;
+    if (!p && vk_mem_resolve(u->addr + off, 8, &sp)) p = (const void *)(uintptr_t)(u->addr + off);
+    if (p) memcpy(&h, p, 8);
+    return h;
+}
+
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     static VkWriteDescriptorSet w[MAX_BINDINGS];
     static VkDescSlot d[MAX_DESC];
@@ -1790,7 +1809,8 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                 for (uint32_t k = 0; k < cnt; k++) {
                     int slot = r->slot + (int)k;
                     uint64_t h = 0;
-                    if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
+                    if (r->cbuf_slot >= 3) h = cbuf_handle(ex, st, r, k);
+                    else if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
                     else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
                     tex_info(ex, r, h, img, r->separate, &o[k].image);
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
