@@ -209,7 +209,8 @@ the null decoder). No host AAC decoder needed.
   cookie texture through an array whose handles are in user uniform block 3 (Ryujinx `fp_t2d_cb3_0[32]`, element k at
   byte 8k). The replay gave such resources slot -1 and bound element k to texture slot k - 1, so the ball's light read
   the depth buffer and darkened the fog over its 48-pixel screen tiles. `vk_exec_draw.c cbuf_handle` reads the handles
-  from the bound block. Scripts can now end in `<tick> SHOT` / `<tick> DUMP`; `build/input/ball.txt` morphs at tick 5400.
+  from the bound block. Scripts can now end in `<tick> SHOT` / `<tick> DUMP`; `build/input/fast.txt` (A every second) reaches gameplay by tick 3000;
+  `build/input/ball.txt` morphs at tick 3000.
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).

@@ -68,8 +68,9 @@ the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). The stray blue/pur
 flare sprites whose shader indexes its attributes (one input array of 16 locations): every location now gets an
 attribute (gfx_shader.c reflect_spirv marks every location an interface array spans). Game time follows real time (the patch set realtime in `recomp/patches-v131072.txt`, host half `runtime/frame_rate.c`;
 regenerate with `gen.py ... --patches recomp/patches-v131072.txt`). Next: whether the occasional green blob is gone, the control buffer write-back if the game turns out to read it, then
-further areas. Test runs: `build/input/newgame.txt`
-with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and P (or present
+further areas. Test runs: `build/input/fast.txt` with
+`MP4_INPUT_SCRIPT` presses A every second into gameplay (by tick 3000, about 50 s; `ball.txt` then morphs, and
+`<tick> SHOT` / `<tick> DUMP` lines capture); run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and P (or present
 `MP4_SHOT_RING_AT=<n>`) writes them as PNGs to `MP4_SHOTS_DIR`. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
 `runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
 `runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.
