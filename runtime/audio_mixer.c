@@ -66,6 +66,10 @@ typedef struct Mixer {
     float voice_scratch[6][MAX_FRAME], filter_scratch[MAX_FRAME], output_scratch[MAX_FRAME * 2];
     double level_sum, level_peak; uint64_t level_count, level_frames; int first_sound_logged;
     int prefill;                                   // render blocks
+    // Health summary (audio_mixer_render, every 60 s): Aux renders, those where the game's DSP code had not yet read
+    // the previous frame from the send ring (it falls behind, and the return ring holds stale samples), and renders
+    // that came more than two frames after the one before (the render thread starved).
+    uint64_t aux_calls, aux_late, late_renders, renders, last_render_ns, health_ns, under_seen, over_seen;
 } Mixer;
 
 static _Atomic float device_volume = 1.0f;
@@ -652,6 +656,7 @@ static void mix_aux(AudioRenderer *r, int mix, const AudrenEffectIn *e) {
     uint8_t *send=ipc_guest(p.send_info,128+(uint64_t)p.capacity*4), *ret=ipc_guest(p.return_info,128+(uint64_t)p.capacity*4);
     uint32_t *sh=(uint32_t *)(send+64),*rh=(uint32_t *)(ret+64); int32_t *sd=(int32_t *)(send+128),*rd=(int32_t *)(ret+128);
     uint32_t wr=sh[1],read=rh[0],total=p.channels*(uint32_t)m->frame;
+    if(e->enabled) { m->aux_calls++; if(((const uint32_t *)send)[0]!=wr) m->aux_late++; }
     if(rt_trace & RT_TRACE_AUDIO) {   // the rings' cursors: CPU header (read, write, lost, total) and DSP header, send then return
         static volatile LONG calls;
         LONG n=InterlockedIncrement(&calls);
@@ -833,9 +838,27 @@ static void mix_circular_sink(AudioRenderer *r,int id) {
 }
 uint32_t audio_mixer_sink_written(AudioRenderer *r,int id) {Mixer *m=r->mixer;return m?m->sink_written[id]:0;}
 
+static void health_note(AudioRenderer *r, Mixer *m) {
+    uint64_t now = kern_now_ns(), frame_ns = (uint64_t)m->frame * 1000000000ull / (uint64_t)r->param.sample_rate;
+    if (m->last_render_ns && now - m->last_render_ns > 2 * frame_ns) m->late_renders++;
+    m->last_render_ns = now;
+    m->renders++;
+    if (!m->health_ns) m->health_ns = now;
+    if (now - m->health_ns < 60000000000ull) return;
+    uint64_t under = atomic_load(&m->underruns), over = atomic_load(&m->overruns);
+    rt_log("audio: 60 s: %llu renders, %llu late; device underruns %llu, overruns %llu; aux %llu renders, %llu with "
+           "the game's DSP behind", (unsigned long long)m->renders, (unsigned long long)m->late_renders,
+           (unsigned long long)(under - m->under_seen), (unsigned long long)(over - m->over_seen),
+           (unsigned long long)m->aux_calls, (unsigned long long)m->aux_late);
+    m->under_seen = under, m->over_seen = over;
+    m->renders = m->late_renders = m->aux_calls = m->aux_late = 0;
+    m->health_ns = now;
+}
+
 void audio_mixer_render(AudioRenderer *r, double seconds) {
     (void)seconds;
     Mixer *m = r->mixer; if (!m) return;
+    health_note(r, m);
     const int frames = m->frame, mc = r->param.submix_count + 1;
     memset(m->buf, 0, (size_t)m->nbuf * (size_t)frames * sizeof(float));
     int at = 0;
