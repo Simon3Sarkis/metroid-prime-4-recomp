@@ -307,9 +307,13 @@ const RtGuestLayout *mem_layout(void) { return &L; }
 // Shadow storage of a virtual pool mapped from CPU-visible pool memory (nvn_api_core.c): a watched reservation below
 // the address limit between the alias region and the module window, so textures over it are uploaded from it like
 // any CPU-written storage and the pages the mapping copies are tracked. The whole pool is committed at once (zero
-// pages cost nothing until touched): a texture upload reads its whole storage, mapped or not.
+// pages cost nothing until touched): a texture upload reads its whole storage, mapped or not. The reservation is
+// rounded up to whole 2 MiB regions, the unit of the write-watch snapshots (vk_memory.c snap_regions) and freezes
+// (FRZ_SIZE): a query over the last region of a pool that ends inside one (this game's 207 MiB light volume pools)
+// would reach past the reservation, GetWriteWatch refuses it, and every texture over the pool counted as untracked,
+// so each was uploaded again, whole, at every use (5 x 207 MiB a frame, about 5 fps, after the first boss).
 uint64_t mem_shadow_reserve(uint64_t size) {
-    size = align_up(size, 0x10000);
+    size = align_up(size, FRZ_SIZE);
     for (uint64_t at = shadow_next; at + size <= shadow_end; at += GiB)
         if (reserve_at(at, size, MEM_WRITE_WATCH)) {
             shadow_next = align_up(at + size, GiB);
