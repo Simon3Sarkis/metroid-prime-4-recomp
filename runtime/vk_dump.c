@@ -765,6 +765,24 @@ void vk_dump_draw_params(VkExec *ex, int indexed, int prim, int first, int count
     ReleaseSRWLockExclusive(&rec_lock);
 }
 
+void vk_dump_indices(uint64_t addr, int itype, int count) {
+    AcquireSRWLockExclusive(&rec_lock);
+    if (active() && frame_now() == dump_frame && addr && addr < RT_ADDRESS_LIMIT && count > 0) {
+        int sz = itype == 0 ? 1 : itype == 1 ? 2 : 4;   // NVN_INDEX_TYPE_UNSIGNED_BYTE / SHORT / INT
+        uint32_t lo = ~0u, hi = 0;
+        fprintf(passes_f, "    indices at %#llx (%d-byte):", (unsigned long long)addr, sz);
+        for (int i = 0; i < count && i < 4096; i++) {
+            const uint8_t *p = (const uint8_t *)(uintptr_t)addr + (size_t)i * sz;
+            uint32_t v = sz == 1 ? *p : sz == 2 ? *(const uint16_t *)p : *(const uint32_t *)p;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+            if (i < 24) fprintf(passes_f, " %u", v);
+        }
+        fprintf(passes_f, " ... range %u..%u\n", lo, hi);
+    }
+    ReleaseSRWLockExclusive(&rec_lock);
+}
+
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info) {
     AcquireSRWLockExclusive(&rec_lock);
     if (!active()) goto out;

@@ -169,6 +169,7 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
 void vk_dump_xfb(VkExec *ex, uint32_t op, const void *payload);   // OP_XFB_BIND / OP_XFB_BEGIN / OP_XFB_END, as a note
 void vk_dump_arm(uint64_t frame);                                 // MP4_DUMP=when: the dump frame, once (boot.c)
 void vk_dump_after_draw(VkExec *ex);                              // after a draw's command: MP4_DUMP_DRAWS copies
+void vk_dump_indices(uint64_t addr, int itype, int count);   // the dump frame: an indexed draw's first indices and their range
 void vk_dump_draw_params(VkExec *ex, int indexed, int prim, int first, int count, int instances, int base_instance, int base_vertex);
 // vk_exec_draw.c: the control section, code and code length of NVN stage st of program p; 0 when it has none
 int vk_exec_find_stage(const prog_t *p, int st, const uint8_t **ctl, const uint8_t **code, uint32_t *len);

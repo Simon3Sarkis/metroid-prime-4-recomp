@@ -2283,7 +2283,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
         vk_mem_count(sp.cls, VK_MUSE_IB, bytes);
         VK_MEM_BOUND(sp);
     }
-    if (vk_dump_armed) vk_dump_draw_params(ex, 1, d->prim, 0, d->count, d->instances, d->base_instance, d->base_vertex);
+    if (vk_dump_armed) vk_dump_draw_params(ex, 1 + d->itype, d->prim, 0, d->count, d->instances, d->base_instance, d->base_vertex), vk_dump_indices(d->ibuf, d->itype, d->count);
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
     ex->recorded++;
