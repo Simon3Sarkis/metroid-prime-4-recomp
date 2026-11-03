@@ -576,15 +576,6 @@ static VkFormat zero_format(int type) {
 static void vertex_input(const VkPipeState *s, VtxInput *v) {
     GfxShaderIo io[32];
     uint32_t used = gfx_shader_inputs(s->vs, io), streams = 0;
-    // Every generic location 0-15 gets an attribute, also the ones the reflection does not list: a shader that indexes
-    // its attributes (Maxwell ALD with a register offset) is translated with one input array, in vec4 a[16], which
-    // consumes all 16 locations while the reflection lists only the ones it reads at fixed offsets. With locations of
-    // the array left without an attribute, NVIDIA's driver fetched other attributes or other records into it: this
-    // game's flare sprites (an octagon drawn from an instance record) became screen-sized blue and purple streaks
-    // after the first meteor impact. A location the shader does not read costs an unused attribute.
-    for (int l = 0; l < 16; l++)
-        if (!(used >> l & 1)) io[l] = (GfxShaderIo){GFX_TYPE_FLOAT, 4, 0};
-    used |= 0xffffu;
     int zero = 0;
     memset(v, 0, sizeof *v);
     for (int l = 0; l < 32; l++) {

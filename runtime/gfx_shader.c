@@ -712,7 +712,7 @@ static void add_res(GfxShader *s, int kind, const char *o, const char *e) {
 }
 
 // SPIR-V opcodes and enumerants used below (SPIR-V 1.6 specification, section 3).
-enum { OP_ENTRY_POINT = 15, OP_EXECUTION_MODE = 16, OP_TYPE_INT = 21, OP_TYPE_FLOAT = 22, OP_TYPE_VECTOR = 23,
+enum { OP_ENTRY_POINT = 15, OP_EXECUTION_MODE = 16, OP_TYPE_INT = 21, OP_TYPE_FLOAT = 22, OP_TYPE_VECTOR = 23, OP_CONSTANT = 43,
        OP_TYPE_ARRAY = 28, OP_TYPE_POINTER = 32, OP_VARIABLE = 59, OP_DECORATE = 71,
        DEC_BUILTIN = 11, DEC_LOCATION = 30, DEC_COMPONENT = 31, SC_INPUT = 1, SC_OUTPUT = 3, EM_LOCAL_SIZE = 17 };
 
@@ -727,8 +727,8 @@ static void reflect_spirv(GfxShader *s) {
     // per id: location + 1 (0 = none), component flag, scalar/vector description of types, pointee of pointers
     int32_t *loc = calloc(bound, sizeof *loc);
     uint8_t *packed = calloc(bound, 1), *ttype = calloc(bound, 1), *tcomps = calloc(bound, 1);
-    uint32_t *pointee = calloc(bound, sizeof *pointee);
-    if (!loc || !packed || !ttype || !tcomps || !pointee) goto out;
+    uint32_t *pointee = calloc(bound, sizeof *pointee), *cval = calloc(bound, sizeof *cval), *alen = calloc(bound, sizeof *alen);
+    if (!loc || !packed || !ttype || !tcomps || !pointee || !cval || !alen) goto out;
     for (uint64_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
         if (!len || i + len > n) break;
@@ -745,8 +745,11 @@ static void reflect_spirv(GfxShader *s) {
             ttype[id] = GFX_TYPE_FLOAT, tcomps[id] = 1;
         } else if (op == OP_TYPE_VECTOR && len >= 4 && id < bound && a[1] < bound) {
             ttype[id] = ttype[a[1]], tcomps[id] = (uint8_t)a[2];
+        } else if (op == OP_CONSTANT && len >= 4 && a[1] < bound) {
+            cval[a[1]] = a[2];
         } else if (op == OP_TYPE_ARRAY && len >= 4 && id < bound && a[1] < bound) {
             ttype[id] = ttype[a[1]], tcomps[id] = tcomps[a[1]];   // element type (arrayed interface blocks)
+            alen[id] = a[2] < bound ? cval[a[2]] : 0;
         } else if (op == OP_TYPE_POINTER && len >= 4 && id < bound) {
             pointee[id] = a[2];
         } else if (op == OP_VARIABLE && len >= 4) {
@@ -755,14 +758,21 @@ static void reflect_spirv(GfxShader *s) {
                 int l = loc[var] - 1;
                 uint32_t t = pointee[type] < bound ? pointee[type] : 0;
                 GfxShaderIo io = {ttype[t], tcomps[t] ? tcomps[t] : 4, packed[var]};
-                if (sc == SC_INPUT) s->in_mask |= 1u << l, s->in[l] = io;
-                else s->out_mask |= 1u << l, s->out[l] = io;
+                // An array of vectors in a vertex or fragment interface takes one Location per element: the translator
+                // declares one when the shader indexes its attributes or varyings (Maxwell ALD/IPA with a register
+                // offset), in vec4 a[16]. Marking only the first left the rest without a vertex attribute or a vertex
+                // output, and NVIDIA's driver read other data there (flare sprites drawn as screen-sized streaks).
+                // Arrays in the other stages' interfaces are per vertex, not per Location.
+                uint32_t span = (s->stage == GFX_STAGE_VS || s->stage == GFX_STAGE_FS) && alen[t] ? alen[t] : 1;
+                for (uint32_t k = 0; k < span && l + (int)k < 32; k++)
+                    if (sc == SC_INPUT) s->in_mask |= 1u << (l + k), s->in[l + k] = io;
+                    else s->out_mask |= 1u << (l + k), s->out[l + k] = io;
             }
         }
         i += len;
     }
 out:
-    free(loc), free(packed), free(ttype), free(tcomps), free(pointee);
+    free(loc), free(packed), free(ttype), free(tcomps), free(pointee), free(cval), free(alen);
 }
 
 static void reflect(GfxShader *s) {
