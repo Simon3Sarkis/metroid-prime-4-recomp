@@ -54,7 +54,8 @@ static int skip_runs, dump_ubo;        // MP4_DUMP_SKIP_RUNS, MP4_DUMP_UBO
 static int arm_on_xfb;                 // MP4_DUMP=xfb: the dump frame is the one whose replay meets the first transform feedback begin
 static int arm_on_call;                // MP4_DUMP=when: the dump frame is set by vk_dump_arm (boot.c ring_shot, MP4_DUMP_WHEN)
 static int draws_pass = -1, in_draw_copy;   // MP4_DUMP_DRAWS=<pass>: colour target 0 copied after every draw of that pass
-static int dump_vb;                    // MP4_DUMP_VB=1: the vertex streams of every draw of the dump frame, as guest memory holds them
+static int dump_vb;
+static int xfb_probe;                  // MP4_DUMP_XFB_PROBE=1: the vertex outputs of every draw of the MP4_DUMP_DRAWS pass, captured                    // MP4_DUMP_VB=1: the vertex streams of every draw of the dump frame, as guest memory holds them
 static uint32_t want_tex[16][2];       // MP4_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -497,6 +498,7 @@ static uint64_t shader_hash(const GfxShader *s) {
 typedef struct { VkPipeline p; uint64_t th; int draws; char *text; } Ent;
 static Ent ents[MAX_ENTS];
 static int nents, ents_over, pass_draws;
+static int last_ent;                   // the pipe entry of the latest draw, for its "draw n of pass" line
 typedef struct { VkImage image; VkFormat format; uint32_t w, h, d; int id, is2d; } Lut;
 static Lut luts[MAX_LUTS];          // queued for the next pass end or dispatch
 static int nluts;
@@ -605,6 +607,17 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
                 for (uint64_t k = 0; k < 40 && (k + 1) * 16 <= n; k++)
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
+                // the copy the GPU reads (vk_usnap.c), where it differs from guest memory now
+                uint64_t sn = n < 640 ? n : 640;
+                const float *g = vk_usnap_peek(u->addr, sn);
+                if (g && memcmp(g, f, (size_t)sn)) {
+                    sp(b, "\n      snapshot differs:");
+                    for (uint64_t k = 0; k < 40 && (k + 1) * 16 <= sn; k++)
+                        if (memcmp(g + 4 * k, f + 4 * k, 16))
+                            sp(b, " [%llu] %g %g %g %g", (unsigned long long)k, g[4 * k], g[4 * k + 1], g[4 * k + 2], g[4 * k + 3]);
+                } else if (!g) {
+                    sp(b, "\n      (no snapshot: live memory)");
+                }
             } else {
                 sp(b, " (not mapped)");
             }
@@ -760,8 +773,8 @@ void vk_dump_draw_params(VkExec *ex, int indexed, int prim, int first, int count
     (void)ex;
     AcquireSRWLockExclusive(&rec_lock);
     if (active() && frame_now() == dump_frame)
-        fprintf(passes_f, "  draw %d of pass %d: %s prim %d first %d count %d instances %d base instance %d base vertex %d\n", pass_draws - 1,
-                seq, indexed ? "indexed" : "arrays", prim, first, count, instances, base_instance, base_vertex);
+        fprintf(passes_f, "  draw %d of pass %d (pipe %d): %s prim %d first %d count %d instances %d base instance %d base vertex %d\n",
+                pass_draws - 1, seq, last_ent, indexed ? "indexed" : "arrays", prim, first, count, instances, base_instance, base_vertex);
     ReleaseSRWLockExclusive(&rec_lock);
 }
 
@@ -792,8 +805,10 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
     for (int i = 0; i < nents; i++)
         if (ents[i].p == p && ents[i].th == th) {
             ents[i].draws++;
+            last_ent = i;
             goto out;
         }
+    last_ent = -1;
     if (nents == MAX_ENTS) {
         ents_over++;
         goto out;
@@ -805,6 +820,7 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
        (unsigned)ex->prog_stages, s->prim, ex->xfb_active ? " xfb" : "");
     state_line(&b, ex, s);
     describe_bindings(&b, ex, info);
+    last_ent = nents;
     ents[nents++] = (Ent){p, th, 1, b.s};
 out:
     ReleaseSRWLockExclusive(&rec_lock);
@@ -854,6 +870,72 @@ static void pass_decide(int same_targets) {
 
 // MP4_DUMP_DRAWS=<pass>: after each draw of that pass of the dump frame, the pass is closed, colour target 0 copied
 // as pass_<pass>_draw_<n>.png and the pass opened again (its attachments load), for finding the draw behind a pixel.
+// MP4_DUMP_VB with MP4_DUMP_DRAWS: right after each draw of that pass, the GPU copies the first 4 KiB of each of the
+// draw's streams 0-3 as it sees them (vb_..._s<n>_gpu.bin, next to the CPU's view in vb_..._s<n>.bin): a record that differs
+// between the two was changed after the replay saw it, or reached the GPU stale.
+typedef struct { VkBuffer buf; VmaAllocation alloc; const uint8_t *map; uint64_t size; char path[600]; } VbJob;
+
+static void vb_done(void *arg) {
+    VbJob *j = arg;
+    vmaInvalidateAllocation(vk_ctx()->vma, j->alloc, 0, VK_WHOLE_SIZE);
+    FILE *f = fopen(j->path, "wb");
+    if (f) fwrite(j->map, 1, (size_t)j->size, f), fclose(f);
+    vmaDestroyBuffer(vk_ctx()->vma, j->buf, j->alloc);
+    free(j);
+}
+
+static void vb_gpu_snap(VkExec *ex, int draw, int st) {
+    uint64_t addr = ex->vbuf[st].address, size = ex->vbuf[st].size < 4096 ? ex->vbuf[st].size : 4096;
+    VkMemSpan s;
+    if (!dump_vb || !addr || !size || !vk_mem_resolve(addr, size, &s) || s.avail < size) return;
+    VK_MEM_PICK(s);
+    VkBuffer bb;
+    VkDeviceSize bo;
+    if (vk_exec_vb_bound(st, &bb, &bo) && (bb != s.buffer || bo != s.offset)) {   // copy what the draw read
+        fprintf(passes_f, "    stream %d of draw %d is bound at buffer %p+%#llx, the address resolves to %p+%#llx\n", st, draw,
+                (void *)bb, (unsigned long long)bo, (void *)s.buffer, (unsigned long long)s.offset);
+        s.buffer = bb, s.offset = bo;
+    }
+    VbJob *j = calloc(1, sizeof *j);
+    if (!j) rt_fatal("vk_dump: out of memory");
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                             .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &j->buf, &j->alloc, &info) != VK_SUCCESS || !info.pMappedData) {
+        free(j);
+        return;
+    }
+    j->map = info.pMappedData, j->size = size;
+    snprintf(j->path, sizeof j->path, "%s/vb_p%04d_d%03d_s%d_gpu.bin", dir, seq, draw, st);
+    VkMemoryBarrier2 mb[2] = {
+        {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+         .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+         .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT},
+        {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+         .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+         .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+         .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb[0]};
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    VkBufferCopy c = {s.offset, 0, size};
+    vkCmdCopyBuffer(ex->cb, s.buffer, j->buf, 1, &c);
+    di.pMemoryBarriers = &mb[1];
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    ex->recorded += 3;
+    vk_completion_add(ex->fence, vb_done, j);
+}
+
+// The number the next draw will get when MP4_DUMP_XFB_PROBE asks for its vertex outputs, else -1 (vk_exec_draw.c
+// op_draw_idx captures them with transform feedback into xfb_p<pass>_d<draw>.bin under vk_dump_dir()).
+int vk_dump_probe_draw(void) {
+    if (!xfb_probe || in_draw_copy || draws_pass < 0) return -1;
+    return active() && frame_now() == dump_frame && seq == draws_pass ? pass_draws : -1;
+}
+const char *vk_dump_dir(void) { return dir; }
+int vk_dump_pass_seq(void) { return seq; }
+
 void vk_dump_after_draw(VkExec *ex) {
     if (in_draw_copy || draws_pass < 0) return;
     AcquireSRWLockExclusive(&rec_lock);
@@ -870,6 +952,7 @@ void vk_dump_after_draw(VkExec *ex) {
         AcquireSRWLockExclusive(&rec_lock);
         const char *why = copy_out(ex, t->image, t->format, t->aspect, t->level, t->base_layer, t->width, t->height, 1, name);
         if (why) fprintf(passes_f, "draw copy %s skipped: %s\n", name, why);
+        for (int st = 0; st < 4; st++) vb_gpu_snap(ex, pass_draws - 1, st);
         ReleaseSRWLockExclusive(&rec_lock);
         vk_exec_inline_end(reopen);
     }
@@ -1050,6 +1133,8 @@ void vk_dump_init(void) {
     dump_ubo = du && *du && *du != '0';
     const char *dd = cfg_get("MP4_DUMP_DRAWS");
     draws_pass = dd && *dd ? atoi(dd) : -1;
+    const char *xp = cfg_get("MP4_DUMP_XFB_PROBE");
+    xfb_probe = xp && *xp == '1';
     const char *dv = cfg_get("MP4_DUMP_VB");
     dump_vb = dv && *dv && *dv != '0';
     const char *wt = cfg_get("MP4_DUMP_TEX");

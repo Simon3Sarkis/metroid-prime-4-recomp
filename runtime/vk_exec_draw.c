@@ -198,6 +198,13 @@ static void cb_done(void *arg) {   // completion thread
 
 void vk_exec_draw_new_cb(void) { memset(&B, 0, sizeof B); }
 
+// The buffer and offset stream st was last bound with (vk_dump compares them with a fresh resolve of the address).
+int vk_exec_vb_bound(int st, VkBuffer *b, VkDeviceSize *o) {
+    if (!B.vb_valid || st < 0 || st > 16) return 0;
+    *b = B.vb[st], *o = B.vo[st];
+    return 1;
+}
+
 static CbRes *cb_res(VkExec *ex) {
     if (cur && cur_fence == ex->fence) return cur;
     cur = calloc(1, sizeof *cur);
@@ -823,7 +830,10 @@ static void count_use(int cls, int use, uint64_t n) {
 // A buffer descriptor for [addr, addr+size) of guest memory: its backing (a pool's VRAM mirror when it has one) when
 // aligned, a copy in transient memory when the backing is host memory with an unaligned offset. 0 when neither works.
 // written: the shader stores into it (a mirror's range goes back to guest memory at the end of the submission).
-static void xfb_before_draw(VkExec *ex);   // below: begins a capture before the first draw of a bracket
+static void xfb_before_draw(VkExec *ex);
+typedef struct ProbeJob ProbeJob;
+static ProbeJob *probe_begin(VkExec *ex, int draw);
+static void probe_end(VkExec *ex, ProbeJob *j);   // below: begins a capture before the first draw of a bracket
 static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, uint64_t max, int use, int written,
                       VkDescriptorBufferInfo *out) {
     VkMemSpan sp;
@@ -2256,7 +2266,11 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     static const uint32_t isize[3] = {1, 2, 4};
     if (d->itype < 0 || d->itype > 2) return warn_once(W_INDEX, "index type %d is unknown: draw skipped", d->itype);
     int restart = restart_for(ex, d->prim, d->itype);
-    if (d->count <= 0 || !prepare_draw(ex, d->prim, d->count, restart)) return;
+    int probe = vk_dump_armed && !ex->xfb_active && d->count <= 64 ? vk_dump_probe_draw() : -1;   // sprites only
+    if (probe >= 0) ex->xfb_active = 1;   // prepare_draw picks the pipeline with the capture layout
+    int ok = d->count > 0 && prepare_draw(ex, d->prim, d->count, restart);
+    if (probe >= 0) ex->xfb_active = 0;
+    if (!ok) return;
     xfb_before_draw(ex);
     vk_exec_frame.draws++;
     uint64_t bytes = (uint64_t)d->count * isize[d->itype];
@@ -2284,9 +2298,11 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
         VK_MEM_BOUND(sp);
     }
     if (vk_dump_armed) vk_dump_draw_params(ex, 1 + d->itype, d->prim, 0, d->count, d->instances, d->base_instance, d->base_vertex), vk_dump_indices(d->ibuf, d->itype, d->count);
+    ProbeJob *pj = probe >= 0 ? probe_begin(ex, probe) : NULL;
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
     ex->recorded++;
+    probe_end(ex, pj);
     if (vk_dump_armed) vk_dump_after_draw(ex);
 }
 
@@ -2635,6 +2651,49 @@ static void xfb_before_draw(VkExec *ex) {
         rt_log("vk_exec: transform feedback begins into %u buffer%s (%#llx, %llu bytes) in frame %llu", n, n == 1 ? "" : "s",
                (unsigned long long)ex->xfb_buf[0].addr, (unsigned long long)sizes[0], (unsigned long long)gfx_counters.frames);
 }
+// MP4_DUMP_XFB_PROBE=1 (with MP4_DUMP and MP4_DUMP_DRAWS): every indexed draw of that pass gets its vertex shader
+// with the transform feedback layout (spirv_add_xfb: the located outputs in location order; the vk_pipeline log line
+// gives it) and captures into a host buffer of its own, written as xfb_p<pass>_d<draw>.bin once the GPU is done:
+// what the GPU computed, to set beside a CPU evaluation of the same shader on the dumped inputs.
+struct ProbeJob { VkBuffer buf; VmaAllocation alloc; const uint8_t *map; char path[600]; };
+static void probe_done(void *arg) {
+    ProbeJob *j = arg;
+    vmaInvalidateAllocation(vk_ctx()->vma, j->alloc, 0, VK_WHOLE_SIZE);
+    FILE *f = fopen(j->path, "wb");
+    if (f) fwrite(j->map, 1, 65536, f), fclose(f);
+    vmaDestroyBuffer(vk_ctx()->vma, j->buf, j->alloc);
+    free(j);
+}
+static ProbeJob *probe_begin(VkExec *ex, int draw) {
+    if (!ex->in_pass || !xfb_fns()) return NULL;
+    ProbeJob *j = calloc(1, sizeof *j);
+    if (!j) return NULL;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536,
+                             .usage = VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                  .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &j->buf, &j->alloc, &info) != VK_SUCCESS || !info.pMappedData) {
+        free(j);
+        return NULL;
+    }
+    j->map = info.pMappedData;
+    memset(info.pMappedData, 0xcd, 65536);
+    snprintf(j->path, sizeof j->path, "%s/xfb_p%04d_d%03d.bin", vk_dump_dir(), vk_dump_pass_seq(), draw);
+    VkDeviceSize off = 0, size = 65536;
+    rec_xfb_bind(xfb_bind_fn, ex->cb, 0, 1, &j->buf, &off, &size);
+    rec_xfb_begin(xfb_begin_fn, ex->cb);
+    ex->recorded += 2;
+    return j;
+}
+static void probe_end(VkExec *ex, ProbeJob *j) {
+    if (!j) return;
+    rec_xfb_end(xfb_end_fn, ex->cb);
+    ex->recorded++;
+    ex->xfb_ended = 1;   // the barrier after the pass (vk_exec_xfb_pass_end)
+    vk_completion_add(ex->fence, probe_done, j);
+}
+
 void vk_exec_xfb_pass_end(VkExec *ex, int after) {
     if (!after) {
         if (!ex->xfb_begun) return;

@@ -163,6 +163,10 @@ void vk_exec_frame_log(const tex_t *presented, uint64_t frame);
 // images are copied out and written as PNGs to MP4_DUMP_DIR (default "dump"), with passes.txt (targets, pipelines,
 // textures, samplers) and images.txt (per image value statistics). The hooks run only when vk_dump_armed is set.
 extern int vk_dump_armed;
+int vk_dump_probe_draw(void);
+int vk_exec_vb_bound(int st, VkBuffer *b, VkDeviceSize *o);
+const char *vk_dump_dir(void);
+int vk_dump_pass_seq(void);
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds

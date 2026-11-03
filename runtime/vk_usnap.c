@@ -291,6 +291,17 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     return 1;
 }
 
+// The snapshot's copy of [addr, addr+n), or NULL when the current submission has none (vk_dump compares it with
+// guest memory: a block the game rewrote after the submit call shows two values).
+const void *vk_usnap_peek(uint64_t addr, uint64_t n) {
+    if (!U.on || !n) return NULL;
+    int i = first_above(addr);
+    if (i >= U.nreg) return NULL;
+    const Reg *r = &U.reg[i];
+    if (r->dropped || addr < r->lo || addr + n > r->hi) return NULL;
+    return U.arena->map + r->off + (addr - r->lo);
+}
+
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
     if (!U.mode || !n) return;
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);

@@ -554,6 +554,8 @@ void vk_pipeline_answers(const VkPipeState *s, GfxShaderAnswers *vs, GfxShaderAn
         }
 }
 
+const char *vk_dump_dir(void);   // vk_dump.c
+
 // ---- vertex input (pipeline state, or vkCmdSetVertexInputEXT)
 
 typedef struct {
@@ -887,8 +889,8 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
     uint32_t ep_id = 0, bound = w[3], f32 = 0;
     struct { uint32_t id, loc; } locs[MAXV];
     struct { uint32_t id, type, at; } vars[MAXV];     // Output variables: id, pointer type, instruction index
-    struct { uint32_t id, type; } ptr[MAXV];
-    struct { uint32_t id, count; } vec[MAXV];
+    struct { uint32_t id, type, at; } ptr[MAXV];        // Output pointer types, with their instruction index
+    struct { uint32_t id, count, comp, at; } vec[MAXV];  // vector types: component type and instruction index
     struct { uint32_t id, value; } ic[MAXV];           // int constants (component indices)
     struct { uint32_t id; float value; } fc[MAXV];     // float constants
     int nloc = 0, nvar = 0, nptr = 0, nvec = 0, nic = 0, nfc = 0;
@@ -903,8 +905,10 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
             ann_end = i + len;
             if (op == SPV_OP_DECORATE && len >= 4 && a[1] == SPV_DEC_LOCATION && nloc < MAXV) locs[nloc].id = a[0], locs[nloc++].loc = a[2];
         } else if (op == SPV_OP_TYPE_FLOAT && len >= 3 && a[1] == 32) f32 = a[0];
-        else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && nvec < MAXV) vec[nvec].id = a[0], vec[nvec++].count = a[2];
-        else if (op == SPV_OP_TYPE_POINTER && len >= 4 && a[1] == SPV_SC_OUTPUT && nptr < MAXV) ptr[nptr].id = a[0], ptr[nptr++].type = a[2];
+        else if (op == SPV_OP_TYPE_VECTOR && len >= 4 && nvec < MAXV)
+            vec[nvec].id = a[0], vec[nvec].comp = a[1], vec[nvec].at = (uint32_t)i, vec[nvec++].count = a[2];
+        else if (op == SPV_OP_TYPE_POINTER && len >= 4 && a[1] == SPV_SC_OUTPUT && nptr < MAXV)
+            ptr[nptr].id = a[0], ptr[nptr].at = (uint32_t)i, ptr[nptr++].type = a[2];
         else if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT && nvar < MAXV) vars[nvar].id = a[1], vars[nvar].type = a[0], vars[nvar++].at = (uint32_t)i;
         else if (op == SPV_OP_CONSTANT && len >= 4) {
             int isf = a[0] == f32;
@@ -916,7 +920,7 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
     if (!cap_end || !ep_id || !f32 || ep_end < cap_end || ann_end < ep_end || !fn_at) return NULL;
     // The captured outputs: located variables, and the components stored after the prologue (a store of a constant
     // 0 or 1 before any other store counts as the prologue)
-    struct { uint32_t id, loc, var, comps, off, newtype; } cap[MAXV];
+    struct { uint32_t id, loc, var, comps, off, newtype, narrow, vt, varlen, varw[6]; } cap[MAXV];
     int ncap = 0;
     for (int v = 0; v < nvar; v++) {
         int l = 0;
@@ -929,7 +933,7 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
                     if (vec[j].id == ptr[k].type) declared = vec[j].count;
         int at = ncap++;
         while (at > 0 && cap[at - 1].loc > locs[l].loc) cap[at] = cap[at - 1], at--;
-        cap[at].id = vars[v].id, cap[at].loc = locs[l].loc, cap[at].var = (uint32_t)v, cap[at].comps = declared, cap[at].newtype = 0;
+        cap[at].id = vars[v].id, cap[at].loc = locs[l].loc, cap[at].var = (uint32_t)v, cap[at].comps = declared, cap[at].newtype = 0, cap[at].narrow = 0, cap[at].vt = 0;
     }
     if (!ncap) return NULL;
     // Stores per captured variable: component access chains and what is stored through them
@@ -967,16 +971,16 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
     for (int c = 0; c < ncap; c++) {
         uint32_t m = written[c], comps = m ? 32 - (uint32_t)__builtin_clz(m) : cap[c].comps;   // highest written + 1
         if (comps < cap[c].comps) {   // narrow the variable: a vector type of that width and an Output pointer to it
-            uint32_t vt = 0, pt = 0;
-            for (int j = 0; j < nvec; j++)
-                if (vec[j].count == comps) {   // only float vectors are declared for outputs here
-                    vt = vec[j].id;
-                    for (int k = 0; k < nptr; k++)
-                        if (ptr[k].type == vt) pt = ptr[k].id;
-                }
-            if (comps == 1) vt = f32;
-            cap[c].newtype = pt;
-            if (!pt) added += (vt ? 0 : 4) + 4;
+            // The narrowed variable is declared again where the functions start, after every type: an existing
+            // float vector type and Output pointer are reused there (declaring a second vec3 is invalid SPIR-V, and
+            // so is using one declared after the variable; either crashed NVIDIA's compiler), missing ones are added.
+            uint32_t vt = comps == 1 ? f32 : 0, pt = 0;
+            for (int j = 0; j < nvec && !vt; j++)
+                if (vec[j].count == comps && vec[j].comp == f32) vt = vec[j].id;
+            for (int k = 0; k < nptr && vt; k++)
+                if (ptr[k].type == vt) pt = ptr[k].id;
+            cap[c].narrow = 1, cap[c].vt = vt, cap[c].newtype = pt;
+            added += (vt ? 0 : 4) + (pt ? 0 : 4);
             cap[c].comps = comps;
         }
         cap[c].off = stride, stride += cap[c].comps * 4;
@@ -999,27 +1003,38 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
                 *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_XFB_STRIDE, *p++ = stride;
                 *p++ = 4u << 16 | SPV_OP_DECORATE, *p++ = cap[c].id, *p++ = DEC_OFFSET, *p++ = cap[c].off;
             }
-        if (op == SPV_OP_VARIABLE && len >= 4 && a[2] == SPV_SC_OUTPUT) {
+        if (i == fn_at)
+            for (int c = 0; c < ncap; c++) {
+                if (!cap[c].narrow || !cap[c].varlen) continue;
+                uint32_t vt = cap[c].vt, pt = cap[c].newtype;
+                for (int e = 0; e < c && (!vt || !pt); e++)   // a type added for an earlier output of the same width
+                    if (cap[e].narrow && cap[e].varlen && cap[e].comps == cap[c].comps) vt = cap[e].vt, pt = cap[e].newtype;
+                if (!vt) vt = bound++, *p++ = 4u << 16 | SPV_OP_TYPE_VECTOR, *p++ = vt, *p++ = f32, *p++ = cap[c].comps;
+                if (!pt) pt = bound++, *p++ = 4u << 16 | SPV_OP_TYPE_POINTER, *p++ = pt, *p++ = SPV_SC_OUTPUT, *p++ = vt;
+                cap[c].vt = vt, cap[c].newtype = pt;
+                memcpy(p, cap[c].varw, cap[c].varlen * 4);
+                p[1] = pt;
+                p += cap[c].varlen;
+            }
+        if (op == SPV_OP_VARIABLE && len >= 4 && len <= 6 && a[2] == SPV_SC_OUTPUT) {
             for (int c = 0; c < ncap; c++)
-                if (cap[c].id == a[1] && cap[c].comps < 4 && !cap[c].newtype) {
-                    uint32_t vt = cap[c].comps == 1 ? f32 : 0;
-                    for (int j = 0; j < nvec && !vt; j++)
-                        if (vec[j].count == cap[c].comps) vt = vec[j].id;
-                    if (!vt) vt = bound++, *p++ = 4u << 16 | SPV_OP_TYPE_VECTOR, *p++ = vt, *p++ = f32, *p++ = cap[c].comps;
-                    uint32_t pt = bound++;
-                    *p++ = 4u << 16 | SPV_OP_TYPE_POINTER, *p++ = pt, *p++ = SPV_SC_OUTPUT, *p++ = vt;
-                    cap[c].newtype = pt;
-                }
-            for (int c = 0; c < ncap; c++)
-                if (cap[c].id == a[1] && cap[c].newtype) {
-                    memcpy(p, w + i, len * 4);
-                    p[1] = cap[c].newtype;
-                    p += len, drop = 1;
+                if (cap[c].id == a[1] && cap[c].narrow) {   // moved to the end of the globals (above)
+                    memcpy(cap[c].varw, w + i, len * 4);
+                    cap[c].varlen = len, drop = 1;
                 }
         } else if (i >= fn_at && op == OP_ACCESS_CHAIN && len >= 5) {
+            int scalar = 0;
             for (int k = 0; k < nchain; k++)
-                if (chains[k].chain == a[1] && chains[k].comp < 4 && chains[k].comp >= cap[chains[k].var].comps) drop = 1;
+                if (chains[k].chain == a[1] && chains[k].comp < 4) {
+                    if (chains[k].comp >= cap[chains[k].var].comps) drop = 1;
+                    else if (cap[chains[k].var].narrow && cap[chains[k].var].comps == 1 && len == 5) scalar = 1;
+                }
             if (drop) { i += len; continue; }
+            if (scalar) {   // a variable narrowed to a float: the chain to its component 0 is the variable itself
+                *p++ = 4u << 16 | OP_ACCESS_CHAIN, *p++ = a[0], *p++ = a[1], *p++ = a[2];
+                i += len;
+                continue;
+            }
         } else if (i >= fn_at && op == OP_STORE && len >= 3) {
             for (int k = 0; k < nchain; k++)
                 if (chains[k].chain == a[0] && chains[k].comp < 4 && chains[k].comp >= cap[chains[k].var].comps) drop = 1;
@@ -1031,7 +1046,8 @@ static uint32_t *spirv_add_xfb(const uint32_t *w, uint64_t n, uint64_t *out_n) {
     o[3] = bound;
     *out_n = (uint64_t)(p - o);
     static int said;
-    if (said++ < 4) {
+    extern int vk_dump_armed;   // vk_dump.c: a dump frame logs every layout (MP4_DUMP_XFB_PROBE reads them)
+    if (said++ < 4 || vk_dump_armed) {
         char desc[160] = "";
         size_t dn = 0;
         for (int c = 0; c < ncap && dn < sizeof desc - 20; c++)
@@ -1538,6 +1554,14 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         uint64_t n2 = 0;
         if ((xpatched = spirv_add_xfb(vcode, vw, &n2))) vcode = xpatched, vw = n2;
         else LOG_ONCE("vk_pipeline: cannot add the transform feedback layout to the vertex shader");
+        extern int vk_dump_armed;
+        if (xpatched && vk_dump_armed) {   // MP4_DUMP_XFB_PROBE: the patched module, for spirv-val
+            static int nx;
+            char path[600];
+            snprintf(path, sizeof path, "%s/xfb_vs_%02d.spv", vk_dump_dir(), nx++);
+            FILE *f = fopen(path, "wb");
+            if (f) fwrite(vcode, 4, (size_t)vw, f), fclose(f);
+        }
     }
     vm = make_module(vcode, vw);
     free(vpatched), free(fpatched), free(xpatched);
@@ -1727,7 +1751,17 @@ static VkPipeline lib_create(int kind, const VkPipeState *s, const GKey *k, VkPi
         if (pk->missing && (patched = spirv_add_outputs(vcode, vw, pk->missing, pk->fin, &n2))) vcode = patched, vw = n2;
         else if (pk->missing) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", pk->missing);
         uint32_t *xp = NULL;
-        if (pk->xfb && (xp = spirv_add_xfb(vcode, vw, &n2))) vcode = xp, vw = n2;
+        if (pk->xfb && (xp = spirv_add_xfb(vcode, vw, &n2))) {
+            vcode = xp, vw = n2;
+            extern int vk_dump_armed;
+            if (vk_dump_armed) {   // MP4_DUMP_XFB_PROBE: the patched module, for spirv-val
+                static int nx;
+                char path[600];
+                snprintf(path, sizeof path, "%s/xfb_lib_vs_%02d.spv", vk_dump_dir(), nx++);
+                FILE *f = fopen(path, "wb");
+                if (f) fwrite(vcode, 4, (size_t)vw, f), fclose(f);
+            }
+        }
         else if (pk->xfb) LOG_ONCE("vk_pipeline: cannot add the transform feedback layout to the vertex shader");
         m = make_module(vcode, vw);
         free(xp);
