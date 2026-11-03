@@ -64,8 +64,9 @@ bounds how far the CPU runs ahead of the GPU (`MP4_GPU_AHEAD`), which the game's
 cinematic's AAC audio is decoded by the lifted library (its audio codecs are software). The first area renders
 (front face mirrored for the lower-left origin, shadow-backed virtual pools for the streamed light volumes, integer
 samplers, shader image stores tracked). The BC6H light volume's sparse tile shape (16x16x16 blocks, found by comparing dumps) lit the arm cannon and brightened the scene. Transform feedback is replayed (`VK_EXT_transform_feedback`, layout from the vertex shader's outputs, calls through
-the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). Next: confirm with the user whether the stray glows
-and the occasional green blob are gone, the control buffer write-back if the game turns out to read it, then
+the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). The stray blue/purple streaks after the meteor impact were
+flare sprites whose shader indexes its attributes (one input array of 16 locations): every location now gets an
+attribute (vk_pipeline.c vertex_input). Next: whether the occasional green blob is gone, the control buffer write-back if the game turns out to read it, then
 further areas. Test runs: `build/input/newgame.txt`
 with `MP4_INPUT_SCRIPT` scripts a new game into the cinematic; run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and P (or present
 `MP4_SHOT_RING_AT=<n>`) writes them as PNGs to `MP4_SHOTS_DIR`. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in

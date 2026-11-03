@@ -191,6 +191,12 @@ the null decoder). No host AAC decoder needed.
   on and marks the captured draws "xfb"; `MP4_DUMP_BUF` on the buffer showed the captured positions. The control
   buffer (32 bytes at the begin and end addresses, zero as the game fills it) is not written back yet. Whether the
   readback was behind the stray glows is for the user's next session to tell.
+- Stray blue and purple streaks (from the first meteor impact on) were the game's flare sprites: an octagon drawn
+  from one instance record by a vertex shader that indexes its attributes, translated with one input array
+  `in vec4 a[16]`. The reflection listed only the locations read at fixed offsets, so the array's other locations had
+  no Vulkan attribute, and NVIDIA's driver fetched other data into the array (found by evaluating the shader on the
+  dumped inputs on the CPU and capturing the GPU's outputs with `MP4_DUMP_XFB_PROBE`). Every location 0-15 now gets an
+  attribute (`vk_pipeline.c vertex_input`); the scripted save went from 60-100 frames with stray blue to none.
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).
