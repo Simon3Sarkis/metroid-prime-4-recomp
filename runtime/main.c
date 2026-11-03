@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "host.h"
 #include "platform/platform.h"
 
@@ -285,6 +286,40 @@ void fnprof_hit(uint64_t addr, void *cpu) {
         if (addr != g_breaks[k].addr) continue;
         // MP4_BREAK_BRIEF=1: one line per hit with x0..x3 and 32 bytes at x0+0x30, up to 400,000 hits, for a value's
         // trajectory over a run; otherwise the full dump, 4,000 hits.
+        // MP4_BREAK_COUNT=1: no line per hit; hits are counted per caller, and every 10 s the callers with the most
+        // hits since the last summary are logged (for finding which call sites of a common function run per frame).
+        static int count = -1;
+        if (count < 0) { const char *e = cfg_get("MP4_BREAK_COUNT"); count = e && !strcmp(e, "1"); }
+        if (count) {
+            enum { NC = 1024 };
+            static struct { uint64_t lr; volatile LONG n; } cs[NC];
+            static SRWLOCK cl = SRWLOCK_INIT;
+            static uint64_t t_last;
+            uint64_t lr = c->x[30] - 4;
+            AcquireSRWLockExclusive(&cl);
+            uint32_t h = (uint32_t)((lr >> 2) * 0x9e3779b1u) & (NC - 1);
+            while (cs[h].lr && cs[h].lr != lr) h = (h + 1) & (NC - 1);
+            cs[h].lr = lr, cs[h].n++;
+            uint64_t now = GetTickCount64();
+            if (!t_last) t_last = now;
+            if (now - t_last >= 10000) {
+                t_last = now;
+                rt_log("break count: frame %llu, callers of %s:", (unsigned long long)gfx_stats().frames,
+                       ldr_describe(addr, (char[128]){0}, 128));
+                for (int r = 0; r < 60; r++) {
+                    int best = -1;
+                    for (int i = 0; i < NC; i++)
+                        if (cs[i].lr && cs[i].n > 0 && (best < 0 || cs[i].n > cs[best].n)) best = i;
+                    if (best < 0) break;
+                    char d[128];
+                    rt_log("  %8ld from %s", (long)cs[best].n, ldr_describe(cs[best].lr, d, sizeof d));
+                    cs[best].n = -cs[best].n;   // listed; restored below
+                }
+                for (int i = 0; i < NC; i++) cs[i].n = 0;
+            }
+            ReleaseSRWLockExclusive(&cl);
+            continue;
+        }
         static int brief = -1;
         if (brief < 0) brief = !strcmp(cfg_value("MP4_BREAK_BRIEF"), "1");
         LONG hits = InterlockedIncrement(&g_break_hits);
@@ -294,9 +329,11 @@ void fnprof_hit(uint64_t addr, void *cpu) {
             char peek[3 * 32 + 1] = "";
             if (guest_readable(c->x[0] + 0x30, 32))
                 for (int i = 0; i < 32; i++) snprintf(peek + 3 * i, 4, "%02x ", *(const uint8_t *)(uintptr_t)(c->x[0] + 0x30 + i));
-            rt_log("break: %s from %s: x0 %#llx x1 %#llx x2 %#llx x3 %#llx; x0+0x30: %s", ldr_describe(addr, at, sizeof at),
+            float s0, s1;   // the first float arguments
+            memcpy(&s0, &c->v[0], 4), memcpy(&s1, &c->v[1], 4);
+            rt_log("break: %s from %s: x0 %#llx x1 %#llx x2 %#llx x3 %#llx s0 %g s1 %g; x0+0x30: %s", ldr_describe(addr, at, sizeof at),
                    ldr_describe(c->x[30] - 4, lr, sizeof lr), (unsigned long long)c->x[0], (unsigned long long)c->x[1],
-                   (unsigned long long)c->x[2], (unsigned long long)c->x[3], peek);
+                   (unsigned long long)c->x[2], (unsigned long long)c->x[3], s0, s1, peek);
             break_follow(c);
             continue;
         }

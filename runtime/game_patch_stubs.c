@@ -1,10 +1,8 @@
-// From fe3h-pc-recomp runtime/game_patch_stubs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
-// Stand-ins for totk-pc-recomp runtime/frame_rate.c and runtime/resolution.c, which hold the host half of TotK's
-// 60 fps and resolution patch sets and were not taken over. The rest of the runtime still calls their interface
-// (host.h); these definitions keep the game at its own frame pacing and resolution:
+// From fe3h-pc-recomp runtime/game_patch_stubs.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied; the frame step part moved to runtime/frame_rate.c.
+// Stand-ins for totk-pc-recomp runtime/resolution.c, which holds the host half of TotK's resolution patch set and was
+// not taken over (this game's frame step is runtime/frame_rate.c). The rest of the runtime still calls its interface
+// (host.h); these definitions keep the game at its own resolution:
 //
-// - frame step: no real-time step, so nvn_api_obj.c present_period() follows the game's present interval. The world
-//   clock and the 60 Hz tick count (input scripts, profiler, A/B blocks) run from the first present.
 // - resolution: no extra heap, no grown HeapDef table and no wide UI overlay; the output and scene sizes the overlay
 //   shows are a placeholder until FE3H's own sizes are measured.
 #include <stdatomic.h>
@@ -12,36 +10,6 @@
 #include <stdint.h>
 
 #include "host.h"
-
-// ---------- Frame step
-
-static _Atomic uint64_t g_first_present_ns;   // display time of the first present, 0 before it
-static _Atomic uint64_t g_last_present_ns;
-
-void frame_step_init(void) {}
-
-int frame_step_realtime(void) { return 0; }
-
-uint64_t frame_step_cap_ns(void) { return 0; }
-
-double frame_step_limit_hz(void) { return 0; }   // the overlay shows no limit
-
-void frame_step_present(uint64_t display_ns, int interval) {
-    (void)interval;
-    uint64_t zero = 0;
-    atomic_compare_exchange_strong(&g_first_present_ns, &zero, display_ns ? display_ns : 1);
-    atomic_store(&g_last_present_ns, display_ns);
-}
-
-int64_t frame_step_world_us(void) {
-    uint64_t first = atomic_load(&g_first_present_ns), last = atomic_load(&g_last_present_ns);
-    return first && last >= first ? (int64_t)((last - first) / 1000) : -1;
-}
-
-uint64_t frame_step_ticks(void) {
-    int64_t us = frame_step_world_us();
-    return us < 0 ? 0 : (uint64_t)us * 60 / 1000000;
-}
 
 // ---------- Resolution
 

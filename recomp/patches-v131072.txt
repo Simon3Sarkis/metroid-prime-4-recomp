@@ -1,0 +1,11 @@
+# Code patches for Metroid Prime 4: Beyond 1.1.0 main (recomp/patches.py). The patch page holds one float the runtime
+# writes at every present (runtime/frame_rate.c): +0 the frame step in seconds.
+#
+# Real-time step: the game sends its per-frame update a fixed 1/60 s (main+0x236544 loads it from the frame message,
+# +0x30, and main+0x236548 calls the update main+0x236d78, which hands it on to the game's subsystems). On the Switch the
+# game holds 60 fps, so that is the frame's length; here frames take longer, game time fell behind the wall clock, and
+# subtitles drifted seconds behind the voices they belong to. The load reads the measured step instead. x9 is free:
+# the call that follows does not take it and may clobber it.
+set realtime MP4_REALTIME 1
+
+site realtime main 236544 bd403260 @page:x9 bd400120   # ldr s0, [x19, #0x30] -> adrp x9, page; ldr s0, [x9]

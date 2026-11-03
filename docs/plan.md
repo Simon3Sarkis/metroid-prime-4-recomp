@@ -199,6 +199,12 @@ the null decoder). No host AAC decoder needed.
   attribute: the shader reflection now marks every Location an interface array spans (`gfx_shader.c reflect_spirv`),
   which also gives the vertex shader outputs for a fragment shader's indexed varyings (validation had reported a
   fragment input at Location 9 with no vertex output). The scripted save went from 60-100 frames with stray blue to none.
+- Game time ran slow: the frame update gets a fixed 1/60 s step (main+0x236544 loads it from the frame message, the
+  update at main+0x236d78 hands it on), the frame's length at the Switch's 60 fps. At 41 fps here the game ran at about
+  0.7 of real time and subtitles fell seconds behind their voices. The patch set realtime (`recomp/patches-v131072.txt`,
+  `MP4_REALTIME`, on by default) loads the step from the patch page, where `runtime/frame_rate.c` writes the 5-frame
+  average of display intervals (at most 1/15 s), TotK's real-time step. Found by counting GetSystemTick callers per
+  frame (`MP4_BREAK_COUNT=1`) and logging the step argument (`MP4_BREAK_BRIEF` now prints s0 and s1).
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).
