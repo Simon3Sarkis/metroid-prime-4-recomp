@@ -12,9 +12,9 @@ name renamed and a handful of game-bound tables rewritten ([docs/plan.md](docs/p
 ## Status
 
 Playable from the start: the title screen, menus, saves, the opening cinematic (H.264 movies with AAC audio) and the
-first area through its first boss, with sound, a controller or keyboard and mouse, and the morph ball; about 55 fps
-on an RTX 4070, with the stutter described below. Game time follows real time, so any frame rate keeps the game's
-pace. Only that much of the game has been played so far: later areas will bring visual glitches, and maybe crashes,
+first area through its first boss, with sound, a controller or keyboard and mouse, and the morph ball; 60 fps on an
+RTX 4070, with the stutter described below, and higher rates on request (see "Frame rate"). Game time follows real
+time, so any frame rate keeps the game's pace. Only that much of the game has been played so far: later areas will bring visual glitches, and maybe crashes,
 that nobody has seen yet. The fixes so far are listed in [docs/plan.md](docs/plan.md), which also records Phase 0,
 the survey of the binaries. Version 1.1.0, the final Switch 1 update, is the target.
 
@@ -55,6 +55,25 @@ The setup builds the game on your machine from your own files; nothing from the 
 You need Windows 10 or later, a CPU with AVX2 and a GPU with Vulkan 1.3. To update, run a newer setup on the same
 folder; it keeps your saves. Details: [docs/installer.md](docs/installer.md).
 
+## Settings and frame rate
+
+F1 or Esc opens the in-game menu; its changes are saved to `mp4.ini` next to `mp4.exe`. Every setting, with its
+default, is in [mp4.ini.example](mp4.ini.example), and a `MP4_*` environment variable of the same name overrides the
+file (`MP4_FPS_LIMIT` for `fps_limit`). F10 cycles the performance overlay: off, the frame rate, and a panel with
+frame times.
+
+The Switch runs the game at 60 fps, and that is the default limit. "Frame rate limit" in the menu (`fps_limit`) also
+offers 30, 90, 120, 144 and the monitor's refresh rate (`display`). Above 60 is experimental:
+
+- The game keeps its pace at any rate. With the same inputs at 60 and 120 fps, Samus walks and turns the same
+  distance in the same time; cinematics and movies keep time with their sound. This needs "Game speed follows the
+  clock" (`realtime`, on by default).
+- Not everything has been checked yet. Some effects or animations may still step once per frame and run fast above
+  60; please report what you see. The title screen moves on from its intro movie sooner at higher rates.
+- Your hardware decides how high it goes. On an RTX 4070 the first area runs at 110 to 120 fps in most views and
+  about 80 in the heaviest, where the CPU side limits it; with `display` on a 240 Hz monitor the light views reach
+  200 fps.
+
 ## What you need to build from source
 
 Windows 10 or later, a Vulkan 1.3 GPU, and the toolchain totk-pc-recomp's `docs/building.md` describes: MSYS2
@@ -75,7 +94,6 @@ Build Tools for the shader translator, and Python 3.12. The lifter and its tests
    plays S seconds of game time and exits, `--boot` runs to the first NVN call and exits, and the `--probe-*` modes
    check the host without a window (`runtime/main.c`).
 
-Settings: `mp4.ini.example`.
 
 ## Third-party code
 

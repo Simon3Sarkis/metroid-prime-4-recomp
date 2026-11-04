@@ -4,8 +4,12 @@
 # the file. Keys are case-insensitive; '#' and ';' start a comment; [sections] only group lines (runtime/cfg.c).
 
 [frame rate]
-# Frame rate limit: 30 or 60. The game's logic runs at 30; 60 is untested on this game.
+# Frame rate limit: 30, 60 (the Switch's rate), 90, 120, 144, any whole rate up to 360, or display (the monitor's
+# refresh rate). Above 60 is experimental and needs realtime = 1.
 # fps_limit = 60
+# Game speed follows the clock: the game is stepped by real time, so frame rate does not change its pace (0: the
+# fixed 1/60 s steps of the Switch, which run slow below 60 fps and fast above).
+# realtime = 1
 
 [display]
 # Full screen (1) or a window (0).
