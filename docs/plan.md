@@ -211,6 +211,10 @@ the null decoder). No host AAC decoder needed.
   the depth buffer and darkened the fog over its 48-pixel screen tiles. `vk_exec_draw.c cbuf_handle` reads the handles
   from the bound block. Scripts can now end in `<tick> SHOT` / `<tick> DUMP`; `build/input/fast.txt` (A every second) reaches gameplay by tick 3000;
   `build/input/ball.txt` morphs at tick 3000.
+  The box came back once plant shadows came ahead of the ball in that list: each record (144 bytes from c3+0x80) holds
+  its shadow texture handle at +224, and the array was 32 elements long, so every record after the first clamped to
+  element 31 (a dummy). Arrays from block 3 are now 1024 long (`tools/xlate/Program.cs`), the others stay 32.
+  `build/input/ball2.txt` morphs and rolls forward, where it showed; `MP4_DUMP_UBO=<n>` prints n vec4 per block.
 - The lighting shaders sample the light list, an R32UI texture, and Ryujinx declares every sampler as float; the
   host's per-slot texture answers never reached the translator either, because its slot lookup knew only TotK's
   separate-texture handles at c2+0x168 while this game uses combined handles at c2+0x20 (`Program.cs TexSlot`).

@@ -44,7 +44,14 @@ static class SwshXlate
         public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
         public int QuerySamplerArrayLengthFromPool() => 32;
-        public int QueryTextureArrayLengthFromBuffer(int slot) => 32;
+        // Texture arrays whose handles a user uniform block holds: element k is the handle at byte 8 k of the block
+        // (Ryujinx sizes them by the bound block, size / 8; this offline translator cannot see it). Uniform block 3
+        // (NVN slot 0) of this game's fog and light-list passes holds up to 32 records of 144 bytes, each with a
+        // shadow texture handle at +224, so its arrays reach element 587; 32 elements left the morph ball's record
+        // (the third, after two plant shadows) clamped to element 31, and the fog over its screen tiles went dark.
+        // The other blocks' arrays (about 4900 shaders, material tables) stay at 32: each element is a descriptor
+        // written at every draw.
+        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 3 ? 1024 : 32;
         public int QueryTextureArrayLengthFromPool() => 32;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;

@@ -20,7 +20,7 @@
 // as x/2+1/2, UNORM and sRGB bytes written as stored. Caps: MAX_PASSES passes copied, PNG_CAP bytes of PNGs.
 // MP4_DUMP_TEX=<id>|<w>x<h>[,...]: those texture slots, or 2D textures of that size, are copied where first sampled,
 // whatever their format.
-// MP4_DUMP_UBO=1: each listed pipeline also prints the first 40 vec4 of its user uniform blocks (c3 and up) and the compiler constant bank c1, read from
+// MP4_DUMP_UBO=1|<n>: each listed pipeline also prints the first 40 (or n) vec4 of its user uniform blocks (c3 and up) and the compiler constant bank c1, read from
 // guest memory when the entry is listed. A block the submission rewrites with UpdateUniformBuffer shows its value from
 // before the submission (vk_exec_draw.c upd_note).
 // MP4_DUMP_SKIP_RUNS=1: a render pass with the same targets as the render pass before it is logged but not copied
@@ -50,7 +50,7 @@ static uint64_t dump_frame, log_from;   // log_from: MP4_DUMP_LOG, first frame l
 static char dir[400];
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
-static int skip_runs, dump_ubo;        // MP4_DUMP_SKIP_RUNS, MP4_DUMP_UBO
+static int skip_runs, dump_ubo;        // MP4_DUMP_SKIP_RUNS, MP4_DUMP_UBO (vec4 printed per block, 40 for =1)
 static int arm_on_xfb;                 // MP4_DUMP=xfb: the dump frame is the one whose replay meets the first transform feedback begin
 static int arm_on_call;                // MP4_DUMP=when: the dump frame is set by vk_dump_arm (boot.c ring_shot, MP4_DUMP_WHEN)
 static int draws_pass = -1, in_draw_copy;   // MP4_DUMP_DRAWS=<pass>: colour target 0 copied after every draw of that pass
@@ -604,15 +604,15 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             if (u->addr && vk_mem_resolve(u->addr, 1, &ms)) {
                 uint64_t n = u->size && u->size < ms.avail ? u->size : ms.avail;
                 const float *f = (const float *)(uintptr_t)u->addr;
-                for (uint64_t k = 0; k < 40 && (k + 1) * 16 <= n; k++)
+                for (uint64_t k = 0; k < (uint64_t)dump_ubo && (k + 1) * 16 <= n; k++)
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
                 // the copy the GPU reads (vk_usnap.c), where it differs from guest memory now
-                uint64_t sn = n < 640 ? n : 640;
+                uint64_t sn = n < (uint64_t)dump_ubo * 16 ? n : (uint64_t)dump_ubo * 16;
                 const float *g = vk_usnap_peek(u->addr, sn);
                 if (g && memcmp(g, f, (size_t)sn)) {
                     sp(b, "\n      snapshot differs:");
-                    for (uint64_t k = 0; k < 40 && (k + 1) * 16 <= sn; k++)
+                    for (uint64_t k = 0; (k + 1) * 16 <= sn; k++)
                         if (memcmp(g + 4 * k, f + 4 * k, 16))
                             sp(b, " [%llu] %g %g %g %g", (unsigned long long)k, g[4 * k], g[4 * k + 1], g[4 * k + 2], g[4 * k + 3]);
                 } else if (!g) {
@@ -1130,7 +1130,7 @@ void vk_dump_init(void) {
     const char *sr = cfg_get("MP4_DUMP_SKIP_RUNS");
     skip_runs = sr && *sr && *sr != '0';
     const char *du = cfg_get("MP4_DUMP_UBO");
-    dump_ubo = du && *du && *du != '0';
+    dump_ubo = du && *du && *du != '0' ? (atoi(du) > 1 ? atoi(du) : 40) : 0;   // a number above 1: that many vec4
     const char *dd = cfg_get("MP4_DUMP_DRAWS");
     draws_pass = dd && *dd ? atoi(dd) : -1;
     const char *xp = cfg_get("MP4_DUMP_XFB_PROBE");
