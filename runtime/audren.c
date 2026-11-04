@@ -344,8 +344,9 @@ static void request_update(AudioRenderer *r, const uint8_t *input, uint64_t in_s
     ReleaseSRWLockExclusive(&r->lock);
 }
 
-// ---- render tick: one frame each time the output device has taken the ring below its target (audio_mixer_pace_ns),
-// or every sample_count / sample_rate seconds of the host clock without a device, while stopped or while it stalls
+// ---- render tick: one frame every sample_count / sample_rate seconds of the host clock, that period stretched or
+// shortened by up to 2% to keep the output ring at its target (audio_mixer_queue_error), which follows the device's
+// clock; the plain period without a device, while stopped or while it stalls
 static void advance_voice(AudioRenderer *r, ServerVoice *v, double out_seconds) {
     if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate) return;
     double want = v->fraction + out_seconds * v->in.sample_rate * (v->in.pitch > 0 ? v->in.pitch : 1.0);
@@ -393,28 +394,19 @@ static DWORD WINAPI render_thread(void *p) {
     const double frame = (double)r->param.sample_count / r->param.sample_rate;
     uint64_t next = kern_now_ns();
     while (InterlockedCompareExchange(&r->running, 0, 0)) {
+        // One frame per period, never two in a row on purpose: the DSP renders at a fixed cadence and this game's
+        // auxiliary effect ring holds two frames, which its DSP code processes between consecutive renders. Pacing by
+        // the queue alone (render whenever the device took it below the target) followed the device's pulls of a
+        // 10 ms period, so frames came in pairs; the game's DSP missed one of the pair, the return ring played stale
+        // samples, and the sound turned into a stutter after some minutes of play, once the two clocks' phase drifted
+        // there. The queue now only steers the period: 2% is 100 us a frame, far more than any clock drift.
         uint64_t now = kern_now_ns();
-        int64_t pace = audio_mixer_pace_ns(r, now);
-        if (pace > 0) {
-            wait_ns(timer, (uint64_t)pace);
-            continue;
-        }
-        if (pace == 0) {
-            // The device wants more, still one frame per period: the DSP renders at a fixed cadence and this game's
-            // auxiliary effect ring holds two frames, which its DSP code processes between consecutive renders; a
-            // burst of frames to fill the queue overwrote them before they were read, and the sound came out wrong.
-            if (next > now) {
-                wait_ns(timer, next - now);
-                now = kern_now_ns();
-            } else if (now - next > 100000000ull) {
-                next = now;   // fell far behind (debugger, sleep): resynchronise
-            }
-            next += frame_ns;
-        } else {
-            if (next > now) wait_ns(timer, next - now);
-            else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
-            next += frame_ns;
-        }
+        int paced;
+        double err = audio_mixer_queue_error(r, now, &paced);
+        uint64_t step = paced ? (uint64_t)(frame_ns * (1.0 + 0.02 * err) + 0.5) : frame_ns;
+        if (next > now) wait_ns(timer, next - now);
+        else if (now - next > 100000000ull) next = now;   // fell far behind (debugger, sleep): resynchronise
+        next += step;
         AcquireSRWLockExclusive(&r->lock);
         if (r->state == 0) {
             voices_prepare(r);

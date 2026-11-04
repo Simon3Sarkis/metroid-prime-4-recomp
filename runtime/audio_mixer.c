@@ -11,9 +11,12 @@
 // single-producer single-consumer ring. The SDL audio thread drains that ring without taking any lock: an empty ring
 // plays silence and never blocks the render thread or the guest. MP4_AUDIO=none (or MP4_AUDIO_OFF) mixes without a
 // device; MP4_AUDIO_PREFILL_MS (0..500, default 20) is the queued audio the output waits for after start or underrun.
-// The device's clock paces the render thread, as the audio hardware paces the Switch's DSP (audio_mixer_pace_ns): a
-// frame is rendered when the ring holds less than the output target, max(prefill, two device periods), so the queue and
-// the delay from the game to the speakers stay there and the host and device clocks cannot drift apart. LASRecomp and
+// The device's clock paces the render thread, as the audio hardware paces the Switch's DSP (audio_mixer_queue_error):
+// frames are rendered at a steady cadence of one per sample_count / sample_rate, steered by up to 2% toward keeping the
+// ring at the output target, max(prefill, two device periods), so the queue and the delay from the game to the
+// speakers stay there and the host and device clocks cannot drift apart. Rendering a frame whenever the ring fell below
+// the target instead followed the device's 10 ms pulls: two frames back to back, which this game's Aux ring of two
+// frames cannot take (audren.c render_thread). LASRecomp and
 // SavageWindRecomp pace their renderers by the SDL stream the same way. Without a device, while the renderer is
 // stopped and while the device takes nothing (a stall), the render thread keeps real time on its own timer; what piled
 // up meanwhile is skipped on the SDL thread once the device resumes (more than QUEUE_SLACK_MS above the target plus the
@@ -211,15 +214,18 @@ static void output_open(Mixer *m, int rate) {
            "rendering at %.1f ms queued", name ? name : "?", rate, m->prefill * 5, period, m->target * 1000.0 / rate);
 }
 
-int64_t audio_mixer_pace_ns(AudioRenderer *r, uint64_t now) {
+// The queued output above the target as a fraction of the target (negative below it, at most 1 either way), for the
+// render cadence; 0 with ok cleared without a playing device or while it stalls (the host clock alone paces then).
+double audio_mixer_queue_error(AudioRenderer *r, uint64_t now, int *ok) {
     Mixer *m = r->mixer;
-    if (!m || !m->device_ok || !atomic_load_explicit(&m->playing, memory_order_acquire)) return -1;
+    *ok = 0;
+    if (!m || !m->device_ok || !m->target || !atomic_load_explicit(&m->playing, memory_order_acquire)) return 0;
     uint64_t pulled = atomic_load_explicit(&m->pulled_ns, memory_order_acquire);
-    if (!pulled || (now > pulled && now - pulled > m->stall_ns)) return -1;
+    if (!pulled || (now > pulled && now - pulled > m->stall_ns)) return 0;
     uint64_t have = atomic_load(&m->wr) - atomic_load_explicit(&m->rd, memory_order_acquire);
-    if (have < (uint64_t)m->target) return 0;
-    int64_t ns = (int64_t)((have - (uint64_t)m->target + 1) * 1000000000ull / (uint64_t)m->rate);
-    return ns < 500000 ? 500000 : ns;   // until the device has taken it below the target
+    double x = ((double)have - m->target) / m->target;
+    *ok = 1;
+    return x > 1 ? 1 : x < -1 ? -1 : x;
 }
 
 // Render thread only.
@@ -846,9 +852,12 @@ static void health_note(AudioRenderer *r, Mixer *m) {
     if (!m->health_ns) m->health_ns = now;
     if (now - m->health_ns < 60000000000ull) return;
     uint64_t under = atomic_load(&m->underruns), over = atomic_load(&m->overruns);
-    rt_log("audio: 60 s: %llu renders, %llu late; device underruns %llu, overruns %llu; aux %llu renders, %llu with "
-           "the game's DSP behind", (unsigned long long)m->renders, (unsigned long long)m->late_renders,
+    uint64_t queued = atomic_load(&m->wr) - atomic_load(&m->rd);
+    rt_log("audio: 60 s: %llu renders, %llu late; device underruns %llu, overruns %llu, queued %.1f ms (target %.1f); "
+           "aux %llu renders, %llu with the game's DSP behind", (unsigned long long)m->renders,
+           (unsigned long long)m->late_renders,
            (unsigned long long)(under - m->under_seen), (unsigned long long)(over - m->over_seen),
+           queued * 1000.0 / r->param.sample_rate, m->target * 1000.0 / r->param.sample_rate,
            (unsigned long long)m->aux_calls, (unsigned long long)m->aux_late);
     m->under_seen = under, m->over_seen = over;
     m->renders = m->late_renders = m->aux_calls = m->aux_late = 0;
