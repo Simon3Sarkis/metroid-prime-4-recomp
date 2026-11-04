@@ -66,9 +66,9 @@ cinematic's AAC audio is decoded by the lifted library (its audio codecs are sof
 samplers, shader image stores tracked). The BC6H light volume's sparse tile shape (16x16x16 blocks, found by comparing dumps) lit the arm cannon and brightened the scene. Transform feedback is replayed (`VK_EXT_transform_feedback`, layout from the vertex shader's outputs, calls through
 the recorder thread; `MP4_DUMP=xfb` dumps the capture frame). The stray blue/purple streaks after the meteor impact were
 flare sprites whose shader indexes its attributes (one input array of 16 locations): every location now gets an
-attribute (gfx_shader.c reflect_spirv marks every location an interface array spans). Game time follows real time (the patch set realtime in `recomp/patches-v131072.txt`, host half `runtime/frame_rate.c`;
+attribute (gfx_shader.c reflect_spirv marks every location an interface array spans). Game time follows real time at any frame rate, including above 60 with `MP4_FPS_LIMIT` (the patch set realtime in `recomp/patches-v131072.txt`: the update's step and the {1/60, 1/30} frame-time pair at main+0x13bf400; host half `runtime/frame_rate.c`;
 regenerate with `gen.py ... --patches recomp/patches-v131072.txt`). Next: whether the occasional green blob is gone, the control buffer write-back if the game turns out to read it, then
-further areas. Test runs: `build/input/fast.txt` with
+further areas. Give `MP4_PROFILE_DIR` an absolute Windows path (a relative one resolves next to mp4.exe, an empty profile that starts a new game). Test runs: `build/input/fast.txt` with
 `MP4_INPUT_SCRIPT` presses A every second into gameplay (by tick 3000, about 50 s; `ball.txt` then morphs, and
 `<tick> SHOT` / `<tick> DUMP` lines capture); run them muted (`MP4_VOLUME=0`) when the user plays. For glitches that last a frame, `MP4_SHOT_RING=<n>` keeps the last n presents in memory and P (or present
 `MP4_SHOT_RING_AT=<n>`) writes them as PNGs to `MP4_SHOTS_DIR`. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
@@ -85,7 +85,8 @@ amiibo through `nn::nfp`, no network namespaces imported by `main`. The Switch 2
 
 Still open:
 
-- Frame rate: both 1/60 and 1/30 appear as constants in `main`; whether logic assumes 60 fps is a Phase 1 question.
+- Frame rate: the update's step and the {1/60, 1/30} pair at main+0x13bf400 now follow real time (60 and 120 fps play
+  alike in the first area). About 80 loads of a plain 1/60 float and 13 of a 1/60 double remain unexamined.
 - The DXBC blobs in `MaterialArchive.arc`: reflection the engine reads, or a toolchain leftover? Decide from how
   `main` parses the archive before building the shader path.
 - Video codec of the FMVs (inside the paks; `RetroFMV` on top of `nn::movie`).

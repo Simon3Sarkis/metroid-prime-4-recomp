@@ -49,6 +49,8 @@
 #include "nvn_api.h"
 #include "nvn_obj.h"
 
+void kern_backtrace(const Cpu *c);   // kernel.h
+
 enum { IN_BUFS = 4, IN_CAP = 2 << 20, OUT_BUFS = 8, MAX_MOVIES = 16, VPX_THREADS = 4 };
 enum { ST_OK = 0, ST_ERROR = 0x1000, ST_NULL = 0x100b, ST_NO_OUTPUT = 0x100e, ST_NO_INPUT = 0x1011,
        ST_UNSUPPORTED = 0x2001, ST_NOT_CONFIGURED = 0x2002 };
@@ -917,6 +919,10 @@ static void ov_send_input(Cpu *c) {
     Movie *m = find(arg_x(c, 0));
     if (!m) { pass(c, MOVIE_SEND_INPUT); return; }
     note_entry(m, "SendInputBufferForDecode");
+    if (flags & MOVIE_FLAG_EOS && cfg_get("MP4_MOVIE_EOS_BT")) {   // who ends a movie: the game's player, by its own count
+        rt_log("movie: end of stream sent at %lld us; guest backtrace:", (long long)time);
+        kern_backtrace(c);
+    }
     if (m->unsupported) {   // the null decoder's intake: every 50th packet and the last, with its time
         static volatile LONG sent;
         LONG n = InterlockedIncrement(&sent);

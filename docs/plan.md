@@ -236,6 +236,20 @@ the null decoder). No host AAC decoder needed.
   and the branch fixpoint split the rest. Pairs with such a rewrite are dropped now (capstone names the registers
   an instruction writes): 9,946 of them in `main`, and the discovery fixpoint went from seven rounds to two. Every
   module was regenerated.
+- Frame rates above 60 (2026-11-04). The frame limit (`MP4_FPS_LIMIT`, 30 to 360 or `display`) came over with
+  `runtime/frame_rate.c`, but with only the update's step patched the player still moved by the frame: the same inputs
+  at the same real time (`build/input/rate_compare.txt`, ticks after the save has loaded) walked and turned Samus about
+  twice as far at 120 fps as at 60. Much of the game reads the frame's length from a pair of floats in rodata,
+  main+0x13bf400 = {1/60, 1/30}, picked by the frame-rate mode at main+0x1826d70 (24 sites, all
+  `adrp; add #0x400; ldr s, [x, w, uxtw #2]`). An experiment that wrote the step into the pair matched 60 and 120;
+  the patch set realtime now points the 24 ADRP+ADD pairs at patch page +8, where the step is kept in both elements.
+  Still open: about 80 other loads of a plain 1/60 (main+0x13be780) and 13 of a 1/60 double (main+0x13bf338), some of
+  which may be time steps. Movies keep time at any rate (`ov_movie.c` hands frames over by timestamp); the title
+  screen's attract movie is stopped by the game after about 2400 frames, so at 120 fps it moves on after 20 s instead of
+  40 (`MP4_MOVIE_EOS_BT=1` logs the guest backtrace of the end-of-stream packet; the stop comes from the RetroFMV input
+  thread, main+0xe7002c). In the first area at 120 the scripted walk holds 110 to 120 fps in places and about 82 in the
+  heaviest view, where the render thread is busy about 12 ms a frame; at the monitor's 240 Hz the light views reach
+  200 fps.
 
 ## Shared core
 

@@ -1,5 +1,6 @@
-# Code patches for Metroid Prime 4: Beyond 1.1.0 main (recomp/patches.py). The patch page holds one float the runtime
-# writes at every present (runtime/frame_rate.c): +0 the frame step in seconds.
+# Code patches for Metroid Prime 4: Beyond 1.1.0 main (recomp/patches.py). The patch page holds floats the runtime
+# writes at every present (runtime/frame_rate.c): +0 the frame step in seconds; +8 and +12 the same step again, the
+# frame-time pair below.
 #
 # Real-time step: the game sends its per-frame update a fixed 1/60 s (main+0x236544 loads it from the frame message,
 # +0x30, and main+0x236548 calls the update main+0x236d78, which hands it on to the game's subsystems). On the Switch the
@@ -9,3 +10,60 @@
 set realtime MP4_REALTIME 1
 
 site realtime main 236544 bd403260 @page:x9 bd400120   # ldr s0, [x19, #0x30] -> adrp x9, page; ldr s0, [x9]
+
+# Frame-time pair: much of the game (player movement and turning among it) does not take the update's step but reads
+# the frame's length from a pair of floats in rodata, main+0x13bf400 = {1/60, 1/30}, picked by the frame-rate mode at
+# main+0x1826d70 (nonzero: 60 fps, element 0): `adrp xN, 0x13bf000; add xN, xN, #0x400; ... ldr sM, [xN, wK, uxtw #2]`.
+# With only the step patched, Samus walked and turned twice as far at 120 fps as at 60 for the same real time (same
+# inputs at the same ticks, MP4_FPS_LIMIT 60 against 120). Each ADRP+ADD that forms the pair's address now forms patch
+# page +8 instead, where the runtime keeps the step in both elements. The sites are every ADRP+ADD pair (at most 8
+# instructions apart) reaching 0x13bf400 or 0x13bf404; none reads the ADRP register between the two, and every ADD
+# writes the register it reads.
+site realtime main 11de1c4 b0000f09 @page:x9         # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 11de1c8 91100129 91002129         # add x9, x9, #0x400 -> #8
+site realtime main 11de5a0 b0000f08 @page:x8         # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 11de5a4 91100108 91002108         # add x8, x8, #0x400 -> #8
+site realtime main 11e13b0 d0000ee8 @page:x8         # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 11e13b4 91100108 91002108         # add x8, x8, #0x400 -> #8
+site realtime main 1207b70 90000dc9 @page:x9         # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 1207b74 91100129 91002129         # add x9, x9, #0x400 -> #8
+site realtime main 1257f80 90000b4b @page:x11        # adrp x11, 0x13bf000 -> adrp x11, page
+site realtime main 1257f84 9110016b 9100216b         # add x11, x11, #0x400 -> #8
+site realtime main 1b9828 d0009029 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 1b982c 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 1f2514 b0008e69 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 1f2518 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 23cc78 f0008c09 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 23cc7c 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 265f30 d0008ac9 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 265f34 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 2fec9c b0008608 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 2feca0 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main 320cd8 f00084f5 @page:x21         # adrp x21, 0x13bf000 -> adrp x21, page
+site realtime main 320cdc 911002b5 910022b5          # add x21, x21, #0x400 -> #8
+site realtime main 3c6998 b0007fc8 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 3c699c 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main 41bf00 90007d29 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 41bf04 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 508de0 f00075a9 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 508de4 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 686cbc b00069c8 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 686cc0 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main 6e28a0 b00066e8 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 6e28a4 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main 89e06c b0005908 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main 89e070 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main 8dac9c b0005729 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 8daca0 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 975f8c d0005249 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 975f90 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main 980924 f00051e9 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main 980928 91100129 91002129          # add x9, x9, #0x400 -> #8
+site realtime main a8a2d0 b00049a8 @page:x8          # adrp x8, 0x13bf000 -> adrp x8, page
+site realtime main a8a2d4 91100108 91002108          # add x8, x8, #0x400 -> #8
+site realtime main bce11c b0003f8a @page:x10         # adrp x10, 0x13bf000 -> adrp x10, page
+site realtime main bce120 9110014a 9100214a          # add x10, x10, #0x400 -> #8
+site realtime main e43b10 90002bf6 @page:x22         # adrp x22, 0x13bf000 -> adrp x22, page
+site realtime main e43b14 911002d6 910022d6          # add x22, x22, #0x400 -> #8
+site realtime main fc5f64 d0001fc9 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
+site realtime main fc5f68 91100129 91002129          # add x9, x9, #0x400 -> #8

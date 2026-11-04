@@ -4,12 +4,13 @@
 // limit; TotK's 60 fps controller, cloth clock, world clock from the player actor and speed probe are left out.
 //
 // Frame rate: the host half of the patch set realtime (recomp/patches-v131072.txt). The game steps its frame update by
-// a fixed 1/60 s, its frame length on the Switch; the patched site reads the step from the patch page (+0, seconds)
-// instead, and every present writes the moving average of the last 5 display intervals there, at most 1/15 s (slower
+// a fixed 1/60 s, its frame length on the Switch, and much of it (player movement and turning among it) reads that
+// length from a {1/60, 1/30} pair in rodata; the patched sites read the step from the patch page (+0, and the pair at
+// +8) instead, and every present writes the moving average of the last 5 display intervals there, at most 1/15 s (slower
 // frames slow the game down, as on the console), restarted after a gap of a quarter second (loading). Without the step
 // game time ran at the frame rate's share of 60 (about 0.7 at 41 fps), and subtitles fell seconds behind their voices.
 // With the step on, the pacer ignores the game's present interval and holds a frame only to the frame limit
-// (nvn_api_obj.c present_period, MP4_FPS_LIMIT). One 32-bit store per present: the guest reads it on its own thread.
+// (nvn_api_obj.c present_period, MP4_FPS_LIMIT). Three 32-bit stores per present: the guest reads them on its own threads.
 //
 // The world clock and the 60 Hz tick count (input scripts, profiler, A/B blocks) run on display time from the first
 // present, as before the step: with the step game time follows it.
@@ -35,9 +36,13 @@ static double samples[STEP_SAMPLES];
 static unsigned sample_count, sample_next;
 static _Atomic uint64_t first_present_ns, last_present_ns;
 
+// +0 the step the frame update reads; +8 and +12 the frame-time pair (recomp/patches-v131072.txt: the game's
+// {1/60, 1/30} at main+0x13bf400, picked by its frame-rate mode), both the step.
 static void step_store(float seconds) {
     uint32_t w;
     memcpy(&w, &seconds, 4);
+    atomic_store_explicit(&step_word[2], w, memory_order_relaxed);
+    atomic_store_explicit(&step_word[3], w, memory_order_relaxed);
     atomic_store_explicit(step_word, w, memory_order_release);
 }
 
