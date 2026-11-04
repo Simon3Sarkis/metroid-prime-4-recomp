@@ -11,8 +11,30 @@ name renamed and a handful of game-bound tables rewritten ([docs/plan.md](docs/p
 
 ## Status
 
-Phase 1: bringing the game up to its first frames. Phase 0, the survey of the binaries, is recorded in
-[docs/plan.md](docs/plan.md). Version 1.1.0, the final Switch 1 update, is the target.
+Playable from the start: the title screen, menus, saves, the opening cinematic (H.264 movies with AAC audio) and the
+first area through its first boss, with sound, a controller or keyboard and mouse, and the morph ball; about 55 fps
+on an RTX 4070, with the stutter described below. Game time follows real time, so any frame rate keeps the game's
+pace. Only that much of the game has been played so far: later areas will bring visual glitches, and maybe crashes,
+that nobody has seen yet. The fixes so far are listed in [docs/plan.md](docs/plan.md), which also records Phase 0,
+the survey of the binaries. Version 1.1.0, the final Switch 1 update, is the target.
+
+Expect, for now:
+
+- Stutter the first time a scene is seen, while its shaders are translated and its pipelines built; both are cached,
+  and later starts translate the cached list up front (about a minute on 12 threads after a translator change).
+- Rendering glitches past the first area. To report one, add to `mp4.ini`
+
+  ```
+  [capture]
+  shot_ring = 8
+  shots_dir = shots
+  dump = when
+  dump_dir = dump
+  ```
+
+  and press P while it is on screen: the last 8 frames go to `shots` as PNGs and the next frame's render passes to
+  `dump` (about 1 GB, and a short hitch); both paths are relative to the folder the game was started from. The log
+  is `logs\mp4.log` next to the exe.
 
 This repository contains no game content. You need your own dump of the game (XCI or NSP), its 1.1.0 update NSP, and
 the keys dumped from your own console. The content check (`tools/check_content.py`, run by the pre-commit hook and
@@ -31,10 +53,12 @@ Build Tools for the shader translator, and Python 3.12. The lifter and its tests
 2. `python tools/build_hactool.py`, then `python tools/extract_exefs.py <game> --keys <keys> --output build/extracted/v0/exefs`
    for the base and, with `--update`, `--output build/extracted/v131072/exefs` for the update;
    `python tools/extract_romfs.py` merges the update's RomFS (needs about three times the RomFS size, 27 GB, free).
-3. `python recomp/gen.py --exefs build/extracted/v131072/exefs --out generated/v131072 --modules main,subsdk0,sdk`
+3. `python recomp/gen.py --exefs build/extracted/v131072/exefs --out generated/v131072 --modules main,subsdk0,sdk --patches recomp/patches-v131072.txt`
+   (the patches make game time follow real time; without them the game runs slow below 60 fps)
 4. `python tools/build_xlate.py`, then `python tools/build_game.py` (Windows Python; MSYS2 clang does the compiling).
-5. Run `build\v131072\mp4.exe`, in the foreground: the game pauses when its window loses focus. `--boot` runs to the
-   first NVN call and the `--probe-*` modes check the host without a window (`runtime/main.c`).
+5. Run `build\v131072\mp4.exe` to play, in the foreground: the game pauses when its window loses focus. `--seconds S`
+   plays S seconds of game time and exits, `--boot` runs to the first NVN call and exits, and the `--probe-*` modes
+   check the host without a window (`runtime/main.c`).
 
 Settings: `mp4.ini.example`.
 
