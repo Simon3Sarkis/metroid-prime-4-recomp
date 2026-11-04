@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/ov_movie.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; a decoder the host cannot decode is taken over as a null decoder that drops its stream; decodes H.264 in texture mode with openh264 into the game's NVN textures.
+// From fe3h-pc-recomp runtime/ov_movie.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; a decoder the host cannot decode is taken over as a null decoder that drops its stream; decodes H.264 in texture mode with openh264 into the game's NVN textures, openh264 loaded at run time (Cisco's DLL).
 // From totk-pc-recomp runtime/ov_movie.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Adapted from MacNativeGames games/totk/runtime/movie_host.c @ b75be8cf (MIT, Copyright (c) 2026 MacNativeGames
 // contributors).
@@ -25,6 +25,11 @@
 // periods late is dropped if the next one is due too, so the picture keeps time with the movie's sound.
 // MP4_MOVIE_PACE=0 hands every decoded frame over at the next present; MP4_MOVIE_HOST=0 leaves every decoder to the
 // library (which aborts at the first movie).
+// openh264 is loaded at run time, not linked: the installer downloads Cisco's binary (whose H.264 patent licence holds
+// only for that binary, downloaded separately at install time and under the player's control), and the player can turn
+// it off with MP4_OPENH264=0 (mp4.ini [video] openh264 = 0). Without it the game's H.264 decoders become null decoders:
+// the cinematics play their sound over the last picture. The DLL is OPENH264_DLL next to mp4.exe, else MSYS2's
+// libopenh264-8.dll (a development build); the headers are 2.7.0's, the version of both.
 #include <windows.h>
 #include <emmintrin.h>
 #include <stdint.h>
@@ -115,6 +120,46 @@ static int pace_on(void) {
     }
     return g_pace;
 }
+#define OPENH264_DLL L"openh264-2.7.0-win64.dll"
+static long (*p_create)(ISVCDecoder **);
+static void (*p_destroy)(ISVCDecoder *);
+
+// 1 when openh264 is loaded (once, at the first H.264 decoder); "OpenH264 Video Codec provided by Cisco Systems, Inc."
+// goes to the log, as Cisco's binary licence asks of software that uses it.
+static int h264_lib(void) {
+    static int state = -1;
+    if (state >= 0) return state;
+    state = 0;
+    const char *e = cfg_get("MP4_OPENH264");
+    if (e && !strcmp(e, "0")) {
+        rt_log("movie: openh264 turned off (MP4_OPENH264=0): H.264 cinematics show no picture");
+        return 0;
+    }
+    wchar_t dir[MAX_PATH], path[MAX_PATH + 64];
+    DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+    while (n && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
+    dir[n] = 0;
+    static const wchar_t *const names[] = {OPENH264_DLL, L"libopenh264-8.dll"};
+    HMODULE h = NULL;
+    for (size_t i = 0; i < sizeof names / sizeof *names && !h; i++) {
+        _snwprintf(path, sizeof path / sizeof *path, L"%ls%ls", dir, names[i]);
+        path[sizeof path / sizeof *path - 1] = 0;
+        h = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (h) rt_log("movie: openh264 from %ls%s", names[i], i ? "" : "; OpenH264 Video Codec provided by Cisco Systems, Inc.");
+    }
+    if (!h) {
+        rt_log("movie: openh264 (%ls) not found next to mp4.exe: H.264 cinematics show no picture", OPENH264_DLL);
+        return 0;
+    }
+    p_create = (long (*)(ISVCDecoder **))(void (*)(void))GetProcAddress(h, "WelsCreateDecoder");
+    p_destroy = (void (*)(ISVCDecoder *))(void (*)(void))GetProcAddress(h, "WelsDestroyDecoder");
+    if (!p_create || !p_destroy) {
+        rt_log("movie: openh264 lacks WelsCreateDecoder/WelsDestroyDecoder: H.264 cinematics show no picture");
+        return 0;
+    }
+    return state = 1;
+}
+
 static int host_off(void) {
     static int v = -1;
     if (v < 0) {
@@ -288,14 +333,14 @@ static void to_rgba(const uint8_t *y, const uint8_t *u, const uint8_t *v, int ys
 }
 
 static int h264_open(Movie *m) {
-    if (WelsCreateDecoder(&m->dec) || !m->dec) return 0;
+    if (p_create(&m->dec) || !m->dec) return 0;
     SDecodingParam param;
     memset(&param, 0, sizeof param);
     param.uiTargetDqLayer = 255;
     param.eEcActiveIdc = ERROR_CON_SLICE_COPY;
     param.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
     if ((*m->dec)->Initialize(m->dec, &param)) {
-        WelsDestroyDecoder(m->dec);
+        p_destroy(m->dec);
         m->dec = NULL;
         return 0;
     }
@@ -313,7 +358,7 @@ static int h264_open(Movie *m) {
 static void h264_close(Movie *m) {
     if (m->h264_live) {
         (*m->dec)->Uninitialize(m->dec);
-        WelsDestroyDecoder(m->dec);
+        p_destroy(m->dec);
         m->dec = NULL;
         m->h264_live = 0;
     }
@@ -556,7 +601,7 @@ static void ov_ctor(Cpu *c) {
         pass(c, MOVIE_CTOR);
         return;
     }
-    int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE;
+    int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE && h264_lib();
     // Audio (type 4, "audio/mp4a-latm" in this game's cinematics) is left to the library: its decoders for AAC and
     // Opus are software (FDK AAC, libopus inside subsdk0) and run lifted; only the video decoders need the NVIDIA
     // driver. MP4_MOVIE_AUDIO=null takes it over as a null decoder instead (the game then shows no video either: its

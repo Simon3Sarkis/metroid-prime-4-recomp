@@ -1,4 +1,4 @@
-# From fe3h-pc-recomp tools/build_game.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; MP4's version names; links openh264.
+# From fe3h-pc-recomp tools/build_game.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; MP4's version names; openh264 headers (the library is loaded at run time, runtime/ov_movie.c).
 # From totk-pc-recomp tools/build_game.py @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h, FE3H version names, expected hashes from the extraction manifest, no zstd, no icon, one profile folder.
 """Compile the generated C for one game version and link it with the runtime into build/<version>/mp4.exe.
 
@@ -74,7 +74,9 @@ MAIN_ROOT = (ROOT / 'build').resolve().parent
 UCRT = Path(r'C:\msys64\ucrt64\bin')
 CLANG = UCRT / 'clang.exe'
 NINJA = UCRT / 'ninja.exe'
-SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll']
+SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll',
+             UCRT / 'libopenh264-8.dll']   # MP4: the movies' H.264 decoder for a development build; an install gets
+                                           # Cisco's DLL from the installer instead (runtime/ov_movie.c h264_lib)
 
 # Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
 GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden',
@@ -84,10 +86,10 @@ GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-lab
 RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing', '-march=x86-64-v3', '-D_WIN32_WINNT=0x0A00']
 # -Xlinker passes the map path as one argument; -Wl, would split it at any comma in the build dir path
 LINK_FLAGS = ['-fuse-ld=lld', '-Wl,--stack,16777216', '-Xlinker', '"--Map=$builddir/mp4.map"']   # the map feeds tools/prof_report.py
-LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lvulkan-1', '-luser32', '-lgdi32', '-ldwmapi', '-lwinmm', '-lSDL3', '-lopus', '-l:libopenh264.a', '-l:libvpx.a', '-l:libstdc++.a', '-l:libwinpthread.a']   # Vulkan back end; libvpx static (movies)
+LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lvulkan-1', '-luser32', '-lgdi32', '-ldwmapi', '-lwinmm', '-lSDL3', '-lopus', '-l:libvpx.a', '-l:libstdc++.a', '-l:libwinpthread.a']   # Vulkan back end; libvpx static (movies)
 VMA_INCLUDE = UCRT.parent / 'include' / 'vma'   # vk_mem_alloc.h; MSYS2 package vulkan-memory-allocator
 # --toolchain: an llvm-mingw tree. The libraries, headers and DLLs MSYS2 supplies come from the deps directory instead.
-LLVM_LINK_LIBS = ['-lpsapi', '-lbcrypt', '-luser32', '-lgdi32', '-ldwmapi', '-lwinmm', '-lvulkan-1', '-lSDL3', '-lopus', '-l:libopenh264.a',
+LLVM_LINK_LIBS = ['-lpsapi', '-lbcrypt', '-luser32', '-lgdi32', '-ldwmapi', '-lwinmm', '-lvulkan-1', '-lSDL3', '-lopus',
                   '-l:libvpx.a', '-l:libc++.a', '-l:libc++abi.a', '-l:libunwind.a', '-l:libwinpthread.a']
 DEFAULT_DEPS = ROOT / 'toolchain' / 'deps-mingw'
 # Runtime sources compiled per install, not in the library: romfs.c includes romfs_config.h, patches.c the patches.h

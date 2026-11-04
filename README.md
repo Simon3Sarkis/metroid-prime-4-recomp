@@ -40,7 +40,22 @@ This repository contains no game content. You need your own dump of the game (XC
 the keys dumped from your own console. The content check (`tools/check_content.py`, run by the pre-commit hook and
 CI) keeps it that way.
 
-## What you need
+## Installing (players)
+
+The setup builds the game on your machine from your own files; nothing from the game is in the download.
+
+1. Download `MP4-Setup-<version>-windows.zip` from the GitHub Releases page, unpack it anywhere and start
+   `MP4-Setup.exe` (Windows warns about an unsigned program the first time).
+2. Pick the base game (XCI or NSP), the 1.1.0 update (NSP), your `prod.keys`, the game language and an install
+   folder. Leave "Download the OpenH264 video codec" ticked to see the cinematics: the setup then downloads Cisco's
+   codec from Cisco. OpenH264 Video Codec provided by Cisco Systems, Inc.
+3. Wait: about 6 minutes on a fast SSD. The install folder needs about 61 GB free during the setup and 35 GB after it.
+4. Start `mp4.exe` in the install folder. The setup folder and your game files are no longer needed.
+
+You need Windows 10 or later, a CPU with AVX2 and a GPU with Vulkan 1.3. To update, run a newer setup on the same
+folder; it keeps your saves. Details: [docs/installer.md](docs/installer.md).
+
+## What you need to build from source
 
 Windows 10 or later, a Vulkan 1.3 GPU, and the toolchain totk-pc-recomp's `docs/building.md` describes: MSYS2
 UCRT64 (clang, lld, ninja, SDL3, opus, libvpx, Vulkan, vulkan-memory-allocator), the .NET 10 SDK and Visual Studio

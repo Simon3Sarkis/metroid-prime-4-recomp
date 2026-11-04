@@ -1,0 +1,135 @@
+# From fe3h-pc-recomp installer/layout.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), renamed to mp4; MP4 changes are noted where made.
+# From totk-pc-recomp installer/layout.py @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), renamed to mp4; MP4 changes are noted where made.
+"""Where the installer finds what it runs: the one place that maps the release folder and a repository checkout.
+
+Release (docs/installer.md "Release layout"), root = the unpacked folder:
+
+    python/python.exe       runs every tool (numpy, lz4, cryptography, compression.zstd); its ._pth puts .., ../tools
+                            and ../recomp on sys.path, so `python -m installer` imports from the release folder
+    recomp/, tools/         the lifter and the scripts; recomp/patches-<v>.txt, tools/data/expected-v<version>.json for
+                            each supported update (SUPPORTED)
+    llvm/                   llvm-mingw (bin/clang.exe)
+    runtime/                libmp4rt.a, the headers, install-side sources (romfs.c, patches.c, ov_zstd.c) and mp4.ico; runtime/deps/ holds
+                            include/ + lib/ of Vulkan, SDL3, Opus, libvpx and VMA, and openh264's headers
+                            (build_game.py --deps)
+    bin/                    mp4_xlate.exe (+ mp4_xlate.id), hactool.exe, ninja.exe, SDL3.dll, libopus-0.dll
+    mp4.ini.example
+    VERSION                 the release version, one line
+    temp/                   the default temp folder (created)
+
+Dev mode, root = a repository checkout (no python/python.exe): build/py314-embed/py/python.exe (the embeddable
+Python the release ships, with the same packages), else this Python; toolchain/llvm-mingw-*/ and toolchain/deps-mingw;
+runtime/ as the sources with build/install-rtlib/libmp4rt.a (tools/build_game.py --make-runtime-lib --out
+build/install-rtlib); MSYS2 UCRT64 ninja.exe; toolchain/hactool; build/xlate/mp4_xlate.exe; build/install-temp. The version is VERSION with -dev and the commit: 0.1.0-dev+973c626.
+"""
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+EXE = '.exe' if os.name == 'nt' else ''
+UCRT = Path(r'C:\msys64\ucrt64\bin')
+# Updates the installer builds; the check identifies the player's by hash. MP4: 1.1.0, the last Switch 1 update.
+SUPPORTED = ('1.1.0',)
+# MP4 names a version by its CNMT number (tools/extract_exefs.py): the folder of build_game.py and the patch table.
+VERSION_TAGS = {'1.0.0': 'v0', '1.1.0': 'v131072'}
+
+
+def version_tag(version):
+    """'1.1.0' -> 'v131072': the version name of build_game.py and the patch tables."""
+    return VERSION_TAGS[version]
+
+
+@dataclass(frozen=True)
+class Layout:
+    root: Path
+    dev: bool
+    release: str
+    python: Path          # runs the tools
+    tools: Path
+    recomp: Path
+    llvm: Path            # llvm-mingw tree
+    deps: Path            # include/ and lib/ for the link
+    runtime: Path         # runtime headers and install-side sources
+    runtime_lib: Path     # libmp4rt.a
+    ninja: Path
+    hactool: Path
+    xlate: Path           # mp4_xlate.exe; a mp4_xlate.id beside it is copied too
+    dlls: tuple = field(default_factory=tuple)
+    ini_example: Path | None = None
+    temp: Path | None = None
+
+    @property
+    def clang(self):
+        return self.llvm / 'bin' / ('clang' + EXE)
+
+    def patches(self, version):
+        """The code patch table for recomp/gen.py."""
+        return self.recomp / f'patches-{version_tag(version)}.txt'
+
+    def expected(self, version):
+        """The expected hashes of the update."""
+        return self.tools / 'data' / f'expected-v{version}.json'
+
+    def missing(self):
+        """Paths the steps need that do not exist."""
+        need = [self.python, self.tools / 'extract.py', self.tools / 'extract_exefs.py', self.tools / 'extract_romfs.py',
+                self.tools / 'build_game.py', self.recomp / 'gen.py',
+                self.clang,
+                self.deps / 'include', self.deps / 'lib', self.runtime, self.runtime_lib, self.ninja, self.hactool,
+                self.xlate, *self.dlls, *(f(v) for v in SUPPORTED for f in (self.patches, self.expected)),
+                self.expected('1.0.0')]
+        return [str(p) for p in need if not p.exists()]
+
+
+def is_release(root):
+    return (root / 'python' / ('python' + EXE)).is_file()
+
+
+def release_layout(root):
+    version = root / 'VERSION'
+    return Layout(
+        root=root, dev=False,
+        release=version.read_text(encoding='utf-8').strip() if version.is_file() else 'unknown',
+        python=root / 'python' / ('python' + EXE),
+        tools=root / 'tools', recomp=root / 'recomp',
+        llvm=root / 'llvm', deps=root / 'runtime' / 'deps', runtime=root / 'runtime',
+        runtime_lib=root / 'runtime' / 'libmp4rt.a',
+        ninja=root / 'bin' / ('ninja' + EXE), hactool=root / 'bin' / ('hactool' + EXE),
+        xlate=root / 'bin' / ('mp4_xlate' + EXE),
+        dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll'),
+        ini_example=root / 'mp4.ini.example', temp=root / 'temp')
+
+
+def dev_layout(root):
+    commit = subprocess.run(['git', '-C', str(root), 'rev-parse', '--short', 'HEAD'], capture_output=True,
+                            text=True).stdout.strip()
+    embed = root / 'build' / 'py314-embed' / 'py' / ('python' + EXE)
+    trees = sorted(p.parent.parent for p in (root / 'toolchain').glob('llvm-mingw-*/llvm-mingw-*/bin/clang' + EXE))
+    deps = root / 'toolchain' / 'deps-mingw'
+    # MP4: without the release toolchain, the MSYS2 UCRT64 tree the usual build uses (tools/build_game.py): its
+    # bin/clang.exe, include/ and lib/, and the DLLs the exe loads from its bin/.
+    if not trees and (UCRT / ('clang' + EXE)).is_file():
+        trees = [UCRT.parent]
+    if not deps.is_dir() and (UCRT.parent / 'include').is_dir():
+        deps = UCRT.parent
+    version_file = root / 'VERSION'
+    semver = version_file.read_text(encoding='utf-8').strip() if version_file.is_file() else '0.0.0'
+    return Layout(
+        root=root, dev=True, release=f'{semver}-dev+{commit or "unknown"}',
+        python=embed if embed.is_file() else Path(sys.executable),
+        tools=root / 'tools', recomp=root / 'recomp',
+        llvm=trees[-1] if trees else root / 'toolchain' / 'llvm-mingw-missing', deps=deps,
+        runtime=root / 'runtime', runtime_lib=root / 'build' / 'install-rtlib' / 'libmp4rt.a',
+        ninja=UCRT / ('ninja' + EXE), hactool=root / 'toolchain' / 'hactool' / ('hactool' + EXE),
+        xlate=root / 'build' / 'xlate' / ('mp4_xlate' + EXE),
+        dlls=tuple(deps / 'bin' / n for n in ('SDL3.dll', 'libopus-0.dll', 'libiconv-2.dll') if (deps / 'bin' / n).is_file())
+        if deps == UCRT.parent else tuple(sorted((deps / 'bin').glob('*.dll'))),
+        ini_example=root / 'mp4.ini.example', temp=root / 'build' / 'install-temp')
+
+
+def find(root=None):
+    """The layout of root (default: the folder above this package)."""
+    root = Path(root or Path(__file__).resolve().parent.parent).resolve()
+    return release_layout(root) if is_release(root) else dev_layout(root)

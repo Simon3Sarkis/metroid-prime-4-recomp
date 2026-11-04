@@ -1,0 +1,4 @@
+// From fe3h-pc-recomp installer/launcher/launcher.rc @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), renamed to mp4; MP4 changes are noted where made.
+/* The icon of MP4-Setup.exe: runtime/mp4.ico, the icon of mp4.exe. tools/make_release.py compiles this file with
+   llvm-windres -I runtime and links it with launcher.c. */
+1 ICON "mp4.ico"
