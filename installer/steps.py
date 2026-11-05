@@ -3,8 +3,8 @@
 """The six setup steps of docs/installer.md: check, extract, lift, compile, prepare, cleanup.
 
 Extraction runs in this process through tools/extract.py (the package's sibling tools/, which ships with it); lift,
-compile and prepare run the bundled Python on recomp/gen.py, tools/build_game.py, tools/make_romfs_patches.py and
-tools/prepare_shaders.py, whose output goes to <temp>/logs/<step>-<tool>.log and is read for progress. No Win32 call
+compile and prepare run the bundled Python on recomp/gen.py, tools/build_game.py, tools/prepare_shaders.py and
+tools/pack_shader_cache.py, whose output goes to <temp>/logs/<step>-<tool>.log and is read for progress. No Win32 call
 here: the host check is a small C program built with the bundled clang (hostcheck.c).
 
 Install folder: exefs/, romfs/ (romfs.bin, index.json), profile/, mp4.exe and its DLLs, romfs-index.bin,
@@ -574,10 +574,14 @@ class Compile(Step):
 
 # ---- 5. prepare
 
-# MP4: the step installs the shader translator and fetches the video codec. TotK's step also built RomFS patches and
-# prepared a seed of shaders from a list; MP4 has no patches, and its shaders are translated and cached as they are
-# met in play.
-#
+# MP4: the step installs the shader translator, prepares the shaders the release's list names and fetches the video
+# codec. TotK's step also built RomFS patches; MP4 has none. The list (data/shader-list.bin, the variants play met, no
+# game code) is resolved against the player's own RomFS by tools/prepare_shaders.py, which runs mp4.exe
+# --prepare-shaders: every listed variant is translated into shader-cache/ and built into the driver's cache, so a scene
+# met for the first time does not wait for its shaders. tools/pack_shader_cache.py then folds the cache into one file.
+# A dev checkout without build/shader-list.bin skips both; the shaders are then translated as they are met in play.
+TRANSLATED = re.compile(r'gfx_shader: prepare: (\d+) of (\d+) pairs')
+
 # The cinematics are H.264, decoded by openh264 (runtime/ov_movie.c h264_lib, which loads OPENH264_DLL next to
 # mp4.exe). Cisco's H.264 patent licence covers its own binary only when that binary is downloaded separately at install
 # time and the user controls its use, so the release carries no openh264 binary: this step downloads Cisco's from
@@ -619,20 +623,50 @@ def fetch_openh264(ctx, dest):
     return None
 
 
+def prepare_shaders(ctx, dest):
+    """Translate the listed shader variants into dest's shader cache and pack it (MP4 change: TotK's list step, with
+    this project's list and inventory)."""
+    layout, rep = ctx.layout, ctx.reporter
+
+    def parse(line):
+        m = TRANSLATED.search(line)
+        if m:
+            rep.progress('prepare', 'translate', int(m.group(1)), int(m.group(2)), 'shaders')
+        elif 'listed variants' in line:
+            rep.progress('prepare', 'translate', force=True)
+        elif 'gfx_shader: prepared' in line or 'stage library prebuild' in line:
+            rep.progress('prepare', 'libraries', force=True)
+
+    rep.progress('prepare', 'seed', force=True)
+    code, log = run_tool(ctx, 'prepare', layout.tools / 'prepare_shaders.py',
+                         [dest, '--romfs', dest / 'romfs', '--list', layout.shader_list], parse)
+    if code or not (dest / 'shader-prepared.bin').is_file():
+        raise InstallError('prepare.shaders_failed', code=code, log=str(log))
+    # One shader-cache.pack instead of four files per shader (about 140,000 after preparing): mp4.exe reads the pack
+    # first.
+    rep.progress('prepare', 'pack', force=True)
+    code, log = run_tool(ctx, 'prepare', layout.tools / 'pack_shader_cache.py', [dest / 'shader-cache'])
+    if code:
+        raise InstallError('prepare.pack_failed', code=code, log=str(log))
+
+
 class Prepare(Step):
     id = 'prepare'
 
     def key(self, ctx):
         layout = ctx.layout
-        return fingerprint('prepare-mp4-2', ctx.keys['compile'], layout.xlate, layout.xlate.with_suffix('.id'),
-                           OPENH264_SHA256, 'openh264' if openh264_wanted(ctx) else 'no openh264')
+        tools = [layout.tools / n for n in ('prepare_shaders.py', 'shader_inventory.py', 'pack_shader_cache.py')]
+        return fingerprint('prepare-mp4-3', ctx.keys['compile'], layout.xlate, layout.xlate.with_suffix('.id'),
+                           OPENH264_SHA256, 'openh264' if openh264_wanted(ctx) else 'no openh264',
+                           *([layout.shader_list] if layout.shader_list else []), *tools)
 
     def current(self, ctx, record):
         xlate = ctx.dest / ctx.layout.xlate.name
         codec = ctx.dest / OPENH264_DLL
         codec_ok = (codec.is_file() and file_sha256(codec) == OPENH264_SHA256) if openh264_wanted(ctx) \
             else not codec.exists()
-        return xlate.is_file() and file_sha256(xlate) == record.get('xlate_sha256') and codec_ok
+        prepared = not ctx.layout.shader_list or (ctx.dest / 'shader-prepared.bin').is_file()
+        return xlate.is_file() and file_sha256(xlate) == record.get('xlate_sha256') and codec_ok and prepared
 
     def run(self, ctx):
         layout, rep, dest = ctx.layout, ctx.reporter, ctx.dest
@@ -648,6 +682,10 @@ class Prepare(Step):
             replace_file(xlate_id, xlate.with_suffix('.id'))
         else:
             remove(xlate.with_suffix('.id'))
+        if layout.shader_list:
+            prepare_shaders(ctx, dest)
+        else:
+            rep.log('prepare: no shader list (a dev checkout without build/shader-list.bin): shaders are translated in play')
         codec = dest / OPENH264_DLL
         notice = dest / 'openh264-BINARY_LICENSE.txt'   # Cisco's licence, next to the binary it covers
         if openh264_wanted(ctx):

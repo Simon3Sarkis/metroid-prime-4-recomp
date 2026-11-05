@@ -74,6 +74,11 @@ further areas. Give `MP4_PROFILE_DIR` an absolute Windows path (a relative one r
 `MP4_SHOT_RING_AT=<n>`) writes them as PNGs to `MP4_SHOTS_DIR`. Game-bound tables rewritten so far: `runtime/boot.c`, the main stack in
 `runtime/kernel.c`, `tools/build_game.py` versions, `tests/diff/lift.py` bases, `runtime/loader.c` probe table.
 `runtime/ov_mp4.c` is where this game's SDK overrides go, following `refs/fe3h-pc-recomp/runtime/ov_fe3h.c`.
+Shaders: `tools/shader_inventory.py` reads every program from the RomFS (the `SNVN` chunks of `MaterialArchive.arc` and
+of the paks' `MTRL`/`SVGM` assets, the update's patch pak included); the release ships a list of the variants play met
+(`build/shader-list.bin`, made with `tools/prepare_shaders.py --make-list` from `shader-answers.bin`, never committed),
+which the installer prepares from the player's files (`docs/installer.md`, "Shader list"). Regenerate the list after
+playing new areas.
 
 ## Open questions
 

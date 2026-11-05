@@ -31,6 +31,9 @@ BLOCKED_SUFFIXES = {
 
 # ExeFS modules carry no extension.
 BLOCKED_NAMES = {"main", "sdk", "rtld", "main.npdm"} | {f"subsdk{i}" for i in range(10)}
+# Files mp4.exe and tools/prepare_shaders.py write that hold the game's shader code (control sections and code); the
+# shader list (shader-list.bin, shader-answers.bin) holds only hashes and binding answers.
+SHADER_CODE_NAMES = {"shader-programs.bin", "seed-programs.bin", "materialarchive.arc"}
 
 # Written by the code generator into every file it emits.
 GENERATED_MARKER = "MP4_RECOMP_" + "GENERATED_FROM_GAME_CODE"
@@ -60,6 +63,8 @@ def problems_for(path: Path, allow_large: bool = False) -> list[str]:
         found.append(f"blocked file type {path.suffix}")
     if path.name.lower() in BLOCKED_NAMES:
         found.append("name of a Switch executable module")
+    if path.name.lower() in SHADER_CODE_NAMES:
+        found.append("holds the game's shader code")
     if not path.is_file():
         return found
     size = path.stat().st_size

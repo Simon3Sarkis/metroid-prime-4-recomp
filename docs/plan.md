@@ -250,6 +250,22 @@ the null decoder). No host AAC decoder needed.
   thread, main+0xe7002c). In the first area at 120 the scripted walk holds 110 to 120 fps in places and about 82 in the
   heaviest view, where the render thread is busy about 12 ms a frame; at the monitor's 240 Hz the light views reach
   200 fps.
+- Shader preparation (2026-11-04). Phase 0 placed the shaders in `MaterialArchive.arc`; that holds only a few hundred
+  of them. Every program is in an `SNVN` chunk: the archive's, and those inside each material (`MTRL`, 1,913 assets) and
+  vector graphic (`SVGM`) of the paks, the update's `Patch/Z_198_NXPatch.pak.patch` (itself a `PACK`) among them. The
+  formats are in `tools/shader_inventory.py`: a pak's `TOCC`/`ADIR` lists its assets (60-byte entries); a material is an
+  `RFRM` header and one zstd frame; an `SNVN` chunk is an entry table of zstd frames without content sizes, each frame
+  the code blocks of one or more programs followed by their 0x880-byte control sections in the same order. The
+  archive's `NVN2` chunk has a 216-byte control layout this build never uses (the Switch 2 build's, most likely) and
+  `SDX ` the DXBC copies. About 260,000 programs in all, read in 12 s; all 2,826 that one play of the first area met
+  are found by the runtime's own code hash (`gfx_shader.c build_code_hash`, stage from control +0x714). Too many to
+  translate up front (each also has about 12 binding variants in play), so the release ships a list of the variants
+  play met (`tools/prepare_shaders.py --make-list`, from `shader-answers.bin`, no game code) and the installer
+  prepares those from the player's files (`docs/installer.md`, "Shader list"). A fresh copy of the build prepared from
+  the list of one first-area play (34,812 variants, 2 minutes, 1.9 GB) translated 14 shaders in the same scripted play
+  instead of 1,883, and draws waiting for a shader fell from 24,549 to 30. Frame pacing in gameplay was already alike
+  (translation runs in the background, a draw waits or is skipped); what remains are draws skipped while their
+  pipelines link (about 2,000 in both), which the list does not cover.
 
 ## Shared core
 

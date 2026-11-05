@@ -3,7 +3,7 @@
  "step.extract": "Extracting the game",
  "step.lift": "Translating the game code to C",
  "step.compile": "Compiling mp4.exe",
- "step.prepare": "Installing the shader translator and the video codec",
+ "step.prepare": "Preparing the shaders and installing the video codec",
  "step.cleanup": "Cleaning up",
  "phase.check.host": "Checking the processor and the graphics card",
  "phase.check.verify": "Checking the files already installed",

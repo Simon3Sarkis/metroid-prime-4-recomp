@@ -1,6 +1,7 @@
 # From fe3h-pc-recomp tools/make_release.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), renamed to mp4; MP4 changes are noted where made.
 # From totk-pc-recomp tools/make_release.py @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), renamed to mp4; the
-# zstd, shader list, RomFS patch and ov_zstd parts are TotK's and are left out; the launcher builds without an icon.
+# zstd, RomFS patch and ov_zstd parts are TotK's and are left out; the launcher builds without an icon. MP4 change: the
+# shader list is this project's own (data/shader-list.bin, --shader-list) instead of MacNativeGames'.
 """Assemble the release folder of docs/installer.md ("Release layout") from pinned downloads.
 
     .venv-py314\\Scripts\\python tools\\make_release.py --out build/release/MP4-Setup [--zip build/release/MP4-Setup.zip]
@@ -17,7 +18,9 @@ cached in toolchain/release-dl/ and checked against the sha256 in PINS; a mismat
                (compiled per install), deps/ (headers and import libraries of SDL3, Opus, libvpx, Vulkan and VMA, and
                openh264's headers: the installer downloads Cisco's openh264 binary, the release carries none)
     bin/       mp4_xlate.exe (+ .id), hactool.exe, SDL3.dll (upstream), libopus-0.dll, ninja.exe
-    recomp/, tools/, data/, installer/, licenses/, THIRD_PARTY_NOTICES.md, mp4.ini.example
+    recomp/, tools/, installer/, licenses/, THIRD_PARTY_NOTICES.md, mp4.ini.example
+    data/      shader-list.bin (--shader-list): the shader variants play met, hashes and binding answers only, which the
+               installer prepares from the player's own files (tools/prepare_shaders.py); not in the repository
     VERSION    the repository's VERSION plus the commit, 0.1.0+973c626; the installer's release string
     MP4-Setup.exe  installer/launcher/launcher.c built with llvm/ (-mwindows): starts python/pythonw.exe -m installer.gui
 
@@ -103,8 +106,10 @@ LLVM_SKIP_SUFFIXES = {'.idl', '.tlb'}
 
 # tools/ files the installer steps run (and what they import), copied from the repo.
 TOOLS_FILES = ['build_game.py', 'build_shaders.py', 'check_content.py', 'extract.py', 'extract_exefs.py',
-               'extract_romfs.py', 'hostmem.py', 'romfs_index.py']   # hostmem: gen.py sizes its workers by free RAM
-TOOLS_DIRS = ['data']   # data/: expected hashes
+               'extract_romfs.py', 'hostmem.py', 'pack_shader_cache.py', 'prepare_shaders.py', 'romfs_index.py',
+               'shader_inventory.py']   # hostmem: gen.py sizes its workers by free RAM
+SHADER_LIST = None   # main(): --shader-list
+TOOLS_DIRS = ['data']   # tools/data/: expected hashes
 RUNTIME_SUFFIXES = {'.h', '.inc', '.ico'}   # .ico: the installer window icon
 
 PROBES = ['--probe-kernel', '--probe-vkexec', '--probe-nvn-tex', '--probe-shader']
@@ -357,6 +362,8 @@ def build_sources(out):
     for d in TOOLS_DIRS:
         copy_tree(ROOT / 'tools' / d, out / 'tools' / d, lambda r: '__pycache__' in r or r.endswith('.md'))
     copy_tree(ROOT / 'installer', out / 'installer', lambda r: '__pycache__' in r or r.startswith('launcher/'))
+    (out / 'data').mkdir(exist_ok=True)
+    shutil.copy2(SHADER_LIST, out / 'data' / 'shader-list.bin')
     shutil.copy2(ROOT / 'mp4.ini.example', out / 'mp4.ini.example')
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES.md', out / 'THIRD_PARTY_NOTICES.md')
     (out / 'VERSION').write_text(version() + '\n', encoding='utf-8')
@@ -516,7 +523,14 @@ def main():
     ap.add_argument('--out', type=Path, required=True, help='release folder (replaced)')
     ap.add_argument('--zip', type=Path, help='also write the folder as this zip')
     ap.add_argument('--prove', action='store_true', help='only run the compile-and-probe check on an existing folder')
+    ap.add_argument('--shader-list', type=Path, default=MAIN_ROOT / 'build' / 'shader-list.bin',
+                    help='the shader list the release ships as data/shader-list.bin (default build/shader-list.bin, '
+                         'made by tools/prepare_shaders.py --make-list from the shader-answers.bin of play)')
     args = ap.parse_args()
+    global SHADER_LIST
+    SHADER_LIST = args.shader_list.resolve()
+    if not args.prove and not SHADER_LIST.is_file():
+        sys.exit(f'{SHADER_LIST}: no shader list (tools/prepare_shaders.py --make-list)')
     out = args.out.resolve()
     if args.prove:
         prove(out)

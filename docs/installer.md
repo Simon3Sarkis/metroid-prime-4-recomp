@@ -7,7 +7,7 @@ data and no code derived from the game: the installer builds the game on the pla
 holds only the game; the installer and its tools stay outside it.
 
 The installer is totk-pc-recomp's (`installer/`, MIT), renamed and changed where this game differs: one supported
-update line, our extraction tools, no RomFS patches and no shader seed.
+update line, our extraction tools, no RomFS patches, and a shader list of our own (see "Shader list").
 
 ## What the player does
 
@@ -30,7 +30,9 @@ The install folder (`main.c` `portable_paths()` reads this layout; it stays port
   exefs/, romfs/                 extracted from the player's files
   profile/                       saves
   logs/                          mp4.log of the last run, mp4.1.log to mp4.4.log of the runs before it
-  shader cache                   the translations made in play, and the answers met (shader-answers.bin)
+  shader-cache/                  the prepared translations (shader-cache.pack) and those made in play since
+  shader-prepared.bin            the variants the setup prepared, which every start rebuilds into the driver's cache
+  shader-answers.bin             the answers met in play
   mp4-install.json              what built this folder: release version, input hashes, finished steps
 ```
 
@@ -52,9 +54,11 @@ release that changes nothing game-derived skips the rebuild.
 4. **Compile** the generated C, `modules.c`, `romfs.c` and `patches.c` (they bake the per-install layout, RomFS hashes
    and the game version's patch page) and link them with the prebuilt runtime library into `mp4.exe`
    (`build_game.py --runtime-lib`).
-5. **Prepare**: install the shader translator (`mp4_xlate.exe`) next to the game. Shaders are translated and cached
-   as they are met in play; the next start of the game rebuilds what was met into the driver's cache.
-   Download Cisco's OpenH264 binary for the cinematics, unless the player said no (see "Release layout").
+5. **Prepare**: install the shader translator (`mp4_xlate.exe`) next to the game, then prepare the shaders the
+   release's list names (`tools/prepare_shaders.py`: find each in the player's RomFS, `mp4.exe --prepare-shaders`
+   translates them and builds them into the driver's cache, about 2 minutes for 35,000 variants on 12 cores) and pack
+   the cache into one file (`tools/pack_shader_cache.py`). Shaders the list lacks are translated as they are met in
+   play. Download Cisco's OpenH264 binary for the cinematics, unless the player said no (see "Release layout").
 6. **Clean up** the temp folder (generated C and objects).
 
 A cancelled or failed setup resumes from the last finished step (`mp4-install.json`).
@@ -99,7 +103,8 @@ The unpacked release; `tools/make_release.py` assembles it and `--zip` packs it:
 MP4-Setup.exe        starts python/pythonw.exe -m installer.gui (installer/launcher/launcher.c, no console)
 installer/            the installer: steps, CLI, window, en/ru text catalog
 python/               Python 3.14 embeddable + numpy, lz4, cryptography, cffi, pycparser (+ tkinter for the window)
-recomp/, tools/       the lifter, the build and extraction scripts the steps run (copied from the repo), tools/data/
+recomp/, tools/       the lifter, the build, extraction and shader scripts the steps run (copied from the repo), tools/data/
+data/shader-list.bin  the shader list (see "Shader list"); not in the repository
 llvm/                 llvm-mingw, x86_64-only subset (Apache-2.0 with LLVM exception; mingw-w64 parts permissive)
 runtime/              libmp4rt.a and the headers the generated code and modules.c/romfs.c/patches.c include
 bin/                  mp4_xlate.exe, hactool.exe, SDL3.dll, libopus-0.dll, ninja.exe (no openh264: see below)
@@ -136,3 +141,24 @@ mp4.ini.example, VERSION  the default ini; the release string (the repository's 
 - A GitHub release workflow: a release is `make_release.py --zip` on a machine with uv and Python 3.14, a tag at the
   commit the zip names in its `VERSION`, and `gh release create` with the zip as `MP4-Setup-<version>-windows.zip`.
   NSZ and XCZ input. Linux release.
+
+## Shader list
+
+The game's shaders are Maxwell code in `SNVN` chunks: `MaterialArchive.arc` and every material (`MTRL`) and vector
+graphic (`SVGM`) asset of the paks and the update's patch pak, about 260,000 programs (`tools/shader_inventory.py`). Each
+is translated per variant (the texture types and vertex formats it is bound with), so translating every program up
+front would cost hours and many gigabytes and still miss the variants the game asks for. The list names the variants
+play met instead: a file in the layout of `shader-answers.bin` (stage, the runtime's code hash, the binding answers)
+with the input ids zeroed. It holds no game code; `tools/prepare_shaders.py` finds each program in the player's own
+RomFS by its hash. The list ships in the release (`data/shader-list.bin`) and stays out of the repository.
+
+To make or extend it, play a build (the runtime records every variant in `shader-answers.bin` next to `mp4.exe`) and
+merge the files:
+
+```
+python tools/prepare_shaders.py --make-list build/shader-list.bin build/v131072/shader-answers.bin [more files]
+```
+
+`tools/make_release.py --shader-list` takes it (default `build/shader-list.bin`). On a fresh copy of the build, the list
+of one play of the first area (34,812 variants of 2,826 programs) took the translations in play from 1,883 to 14 and the
+draws that waited for a shader from 24,549 to 30, and shortened the longest frame of the save load from 2.4 to 1.6 s.

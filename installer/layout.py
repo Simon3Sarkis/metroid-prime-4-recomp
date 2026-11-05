@@ -13,6 +13,8 @@ Release (docs/installer.md "Release layout"), root = the unpacked folder:
                             include/ + lib/ of Vulkan, SDL3, Opus, libvpx and VMA, and openh264's headers
                             (build_game.py --deps)
     bin/                    mp4_xlate.exe (+ mp4_xlate.id), hactool.exe, ninja.exe, SDL3.dll, libopus-0.dll
+    data/shader-list.bin    the shader variants play met (tools/prepare_shaders.py; MP4 change: shipped with the release,
+                            not kept in the repository)
     mp4.ini.example
     VERSION                 the release version, one line
     temp/                   the default temp folder (created)
@@ -20,7 +22,8 @@ Release (docs/installer.md "Release layout"), root = the unpacked folder:
 Dev mode, root = a repository checkout (no python/python.exe): build/py314-embed/py/python.exe (the embeddable
 Python the release ships, with the same packages), else this Python; toolchain/llvm-mingw-*/ and toolchain/deps-mingw;
 runtime/ as the sources with build/install-rtlib/libmp4rt.a (tools/build_game.py --make-runtime-lib --out
-build/install-rtlib); MSYS2 UCRT64 ninja.exe; toolchain/hactool; build/xlate/mp4_xlate.exe; build/install-temp. The version is VERSION with -dev and the commit: 0.1.0-dev+973c626.
+build/install-rtlib); MSYS2 UCRT64 ninja.exe; toolchain/hactool; build/xlate/mp4_xlate.exe; build/shader-list.bin when
+there is one; build/install-temp. The version is VERSION with -dev and the commit: 0.1.0-dev+973c626.
 """
 import os
 import subprocess
@@ -59,6 +62,7 @@ class Layout:
     dlls: tuple = field(default_factory=tuple)
     ini_example: Path | None = None
     temp: Path | None = None
+    shader_list: Path | None = None   # MP4: None when there is none (dev); the shaders are then translated in play
 
     @property
     def clang(self):
@@ -79,7 +83,10 @@ class Layout:
                 self.clang,
                 self.deps / 'include', self.deps / 'lib', self.runtime, self.runtime_lib, self.ninja, self.hactool,
                 self.xlate, *self.dlls, *(f(v) for v in SUPPORTED for f in (self.patches, self.expected)),
-                self.expected('1.0.0')]
+                self.expected('1.0.0'), self.tools / 'prepare_shaders.py', self.tools / 'shader_inventory.py',
+                self.tools / 'pack_shader_cache.py']
+        if self.shader_list and not self.dev:   # a release always carries its list
+            need.append(self.shader_list)
         return [str(p) for p in need if not p.exists()]
 
 
@@ -99,7 +106,7 @@ def release_layout(root):
         ninja=root / 'bin' / ('ninja' + EXE), hactool=root / 'bin' / ('hactool' + EXE),
         xlate=root / 'bin' / ('mp4_xlate' + EXE),
         dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll'),
-        ini_example=root / 'mp4.ini.example', temp=root / 'temp')
+        ini_example=root / 'mp4.ini.example', temp=root / 'temp', shader_list=root / 'data' / 'shader-list.bin')
 
 
 def dev_layout(root):
@@ -126,7 +133,8 @@ def dev_layout(root):
         xlate=root / 'build' / 'xlate' / ('mp4_xlate' + EXE),
         dlls=tuple(deps / 'bin' / n for n in ('SDL3.dll', 'libopus-0.dll', 'libiconv-2.dll') if (deps / 'bin' / n).is_file())
         if deps == UCRT.parent else tuple(sorted((deps / 'bin').glob('*.dll'))),
-        ini_example=root / 'mp4.ini.example', temp=root / 'build' / 'install-temp')
+        ini_example=root / 'mp4.ini.example', temp=root / 'build' / 'install-temp',
+        shader_list=(root / 'build' / 'shader-list.bin') if (root / 'build' / 'shader-list.bin').is_file() else None)
 
 
 def find(root=None):

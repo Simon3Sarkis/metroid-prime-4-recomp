@@ -20,8 +20,9 @@ the survey of the binaries. Version 1.1.0, the final Switch 1 update, is the tar
 
 Expect, for now:
 
-- Stutter the first time a scene is seen, while its shaders are translated and its pipelines built; both are cached,
-  and later starts translate the cached list up front (about a minute on 12 threads after a translator change).
+- Objects missing for a moment, or a stutter, the first time a scene is seen, while its pipelines are built (and its
+  shaders translated, for scenes the setup's shader list does not cover yet: the list holds what play has met so far,
+  the first area for now). Both are cached, so it happens once.
 - Rendering glitches past the first area. To report one, add to `mp4.ini`
 
   ```
@@ -49,7 +50,7 @@ The setup builds the game on your machine from your own files; nothing from the 
 2. Pick the base game (XCI or NSP), the 1.1.0 update (NSP), your `prod.keys`, the game language and an install
    folder. Leave "Download the OpenH264 video codec" ticked to see the cinematics: the setup then downloads Cisco's
    codec from Cisco. OpenH264 Video Codec provided by Cisco Systems, Inc.
-3. Wait: about 6 minutes on a fast SSD. The install folder needs about 61 GB free during the setup and 35 GB after it.
+3. Wait: about 8 minutes on a fast SSD, 2 of them preparing the shaders. The install folder needs about 61 GB free during the setup and 35 GB after it.
 4. Start `mp4.exe` in the install folder. The setup folder and your game files are no longer needed.
 
 You need Windows 10 or later, a CPU with AVX2 and a GPU with Vulkan 1.3. To update, run a newer setup on the same
