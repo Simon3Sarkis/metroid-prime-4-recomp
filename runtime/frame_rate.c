@@ -10,7 +10,7 @@
 // frames slow the game down, as on the console), restarted after a gap of a quarter second (loading). Without the step
 // game time ran at the frame rate's share of 60 (about 0.7 at 41 fps), and subtitles fell seconds behind their voices.
 // With the step on, the pacer ignores the game's present interval and holds a frame only to the frame limit
-// (nvn_api_obj.c present_period, MP4_FPS_LIMIT). Three 32-bit stores per present: the guest reads them on its own threads.
+// (nvn_api_obj.c present_period, MP4_FPS_LIMIT). Four 32-bit stores per present: the guest reads them on its own threads.
 //
 // The world clock and the 60 Hz tick count (input scripts, profiler, A/B blocks) run on display time from the first
 // present, as before the step: with the step game time follows it.
@@ -37,10 +37,14 @@ static unsigned sample_count, sample_next;
 static _Atomic uint64_t first_present_ns, last_present_ns;
 
 // +0 the step the frame update reads; +8 and +12 the frame-time pair (recomp/patches-v131072.txt: the game's
-// {1/60, 1/30} at main+0x13bf400, picked by its frame-rate mode), both the step.
+// {1/60, 1/30} at main+0x13bf400, picked by its frame-rate mode), both the step; +16 half the step, the tolerance of
+// the same-frame test at main+0x2a2538 (the game's 1/60, one Switch frame).
 static void step_store(float seconds) {
-    uint32_t w;
+    uint32_t w, half;
+    float h = seconds * 0.5f;
     memcpy(&w, &seconds, 4);
+    memcpy(&half, &h, 4);
+    atomic_store_explicit(&step_word[4], half, memory_order_relaxed);
     atomic_store_explicit(&step_word[2], w, memory_order_relaxed);
     atomic_store_explicit(&step_word[3], w, memory_order_relaxed);
     atomic_store_explicit(step_word, w, memory_order_release);

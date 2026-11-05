@@ -243,8 +243,30 @@ the null decoder). No host AAC decoder needed.
   main+0x13bf400 = {1/60, 1/30}, picked by the frame-rate mode at main+0x1826d70 (24 sites, all
   `adrp; add #0x400; ldr s, [x, w, uxtw #2]`). An experiment that wrote the step into the pair matched 60 and 120;
   the patch set realtime now points the 24 ADRP+ADD pairs at patch page +8, where the step is kept in both elements.
-  Still open: about 80 other loads of a plain 1/60 (main+0x13be780) and 13 of a 1/60 double (main+0x13bf338), some of
-  which may be time steps. Movies keep time at any rate (`ov_movie.c` hands frames over by timestamp); the title
+  The other time constants (2026-11-05): every ADRP-based load in `main` of the 1/60 float at main+0x13be780 (60
+  sites), the 1/60 double at main+0x13bf338 (23), a second 1/30 float at main+0x13bea88 (5) and the {60, 30} table at
+  main+0x13bf500 (3) was read in place. None is a time step. The engine scales per-frame quantities by `dt * 60`
+  ("frames"), and these constants turn frames back into seconds or test against one Switch frame:
+  - Frames to seconds (most of the double and about 15 float sites): a property getter (vtable +0x28) or an integer
+    times 1/60, the timeline at main+0xde6a60..0xe1f194 that counts in frames, and the 3D emitter table at
+    main+0x1833118 (main+0x5bd40, main+0xbab314), whose velocity is the position delta over `frames * 1/60`.
+    `MP4_BREAK_AT=main+0x5bcb0` at 120 fps showed the callers already pass `frames = dt * 60` (0.5 in 3,524 of 4,000
+    calls), so that velocity is right at any rate.
+  - Frame-rate-independent already: `powf(c, dt / (1/60))` damping (main+0xd36d84, main+0x120df38), `clock / (1/60)`
+    as a frame number (main+0x10022ac), a 1/60 finite difference (main+0x129ad8c), a history ring sampled every 1/60 s
+    of game time (main+0x120a218), clamps and thresholds (`max(x, 1/30)`, `max(x, 1/60)`).
+  - The time-slot scheduler main+0x1c4968 (and its twin main+0x85b228): 18 lists of jobs booked into slots 1/60 s of
+    game time apart (the clock at `[world+0x6f0268]+0xa4`, seconds of game time; at 120 fps it advances by 1/120),
+    and about 25 clients that test `slot + 1/60 < clock` (missed: book again) and `clock >= slot` (run). Above 60 fps a
+    slot spans two frames and the job runs in the first, as meant; below 60 a frame can step over a slot and the job
+    runs one booking later. Left as is.
+  - The {60, 30} table is indexed by a mode in what looks like a frame-rate governor (main+0x346c94, main+0x1256acc);
+    it sets no step.
+  - A same-frame test (main+0x2a2534): main+0x2a2490 keeps a copy of an object's transform unless object, version and
+    time are unchanged, the time being `|stamp - clock| < 1/60`. With the real-time step that lets a frame a little
+    shorter than 1/60 pass for the same frame, and above 60 fps the copy is refreshed every other frame. The patch set
+    realtime now reads half the step there (patch page +16). The first area does not reach the function (no hit with
+    `MP4_BREAK_AT` in a scripted walk), so its effect is not seen yet. Movies keep time at any rate (`ov_movie.c` hands frames over by timestamp); the title
   screen's attract movie is stopped by the game after about 2400 frames, so at 120 fps it moves on after 20 s instead of
   40 (`MP4_MOVIE_EOS_BT=1` logs the guest backtrace of the end-of-stream packet; the stop comes from the RetroFMV input
   thread, main+0xe7002c). In the first area at 120 the scripted walk holds 110 to 120 fps in places and about 82 in the

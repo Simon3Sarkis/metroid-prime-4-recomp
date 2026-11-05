@@ -1,6 +1,6 @@
 # Code patches for Metroid Prime 4: Beyond 1.1.0 main (recomp/patches.py). The patch page holds floats the runtime
 # writes at every present (runtime/frame_rate.c): +0 the frame step in seconds; +8 and +12 the same step again, the
-# frame-time pair below.
+# frame-time pair below; +16 half the step, the same-frame tolerance at the end.
 #
 # Real-time step: the game sends its per-frame update a fixed 1/60 s (main+0x236544 loads it from the frame message,
 # +0x30, and main+0x236548 calls the update main+0x236d78, which hands it on to the game's subsystems). On the Switch the
@@ -67,3 +67,12 @@ site realtime main e43b10 90002bf6 @page:x22         # adrp x22, 0x13bf000 -> ad
 site realtime main e43b14 911002d6 910022d6          # add x22, x22, #0x400 -> #8
 site realtime main fc5f64 d0001fc9 @page:x9          # adrp x9, 0x13bf000 -> adrp x9, page
 site realtime main fc5f68 91100129 91002129          # add x9, x9, #0x400 -> #8
+
+# Same-frame test: main+0x2a2490 keeps a copy of an object's transform and recomputes it unless the object, a version
+# count and the time are unchanged, the time meaning |stamp - clock| < 1/60, clock the game time in seconds that the
+# scheduler at main+0x1c4968 reads too. On the Switch frames are 1/60 apart, so the copy is refreshed once per frame.
+# With the real-time step a frame a little shorter than 1/60 (or any frame above 60 fps) passes for the same frame and
+# the copy lags one frame (above 60 fps it is refreshed every other frame). The tolerance becomes half the step (patch
+# page +16), which tells this frame from the last at any rate. x9 is written again on both paths before it is read.
+site realtime main 2a2534 900088e9 @page:x9          # adrp x9, 0x13be000 -> adrp x9, page
+site realtime main 2a2538 bd478122 bd401122          # ldr s2, [x9, #0x780] -> [x9, #0x10]

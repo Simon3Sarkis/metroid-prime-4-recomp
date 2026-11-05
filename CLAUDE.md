@@ -91,7 +91,8 @@ amiibo through `nn::nfp`, no network namespaces imported by `main`. The Switch 2
 Still open:
 
 - Frame rate: the update's step and the {1/60, 1/30} pair at main+0x13bf400 now follow real time (60 and 120 fps play
-  alike in the first area). About 80 loads of a plain 1/60 float and 13 of a 1/60 double remain unexamined.
+  alike in the first area). The other 1/60 constants were read (`docs/plan.md`, 2026-11-05): conversions from frames
+  and frame-sized tolerances, no further step; one same-frame test now reads half the step.
 - The DXBC blobs in `MaterialArchive.arc`: reflection the engine reads, or a toolchain leftover? Decide from how
   `main` parses the archive before building the shader path.
 - Video codec of the FMVs (inside the paks; `RetroFMV` on top of `nn::movie`).
