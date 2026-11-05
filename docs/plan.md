@@ -295,6 +295,27 @@ the null decoder). No host AAC decoder needed.
   unions) into `pipeline-cache.bin` and the driver cache. Same scripted play on a fresh prepared copy: 2,247 draws
   skipped without the list, 75 with it; 1,548 pipelines built in play, 53; boot waited 1.5 s for the prewarm. Details
   in `docs/installer.md`, "Pipeline list".
+- The save-load hitch (2026-11-05). The first frame of play after the save load took 1.5 s and the next 0.5 s
+  (scripted first-area play, NVIDIA GPU). `MP4_TRACE=perf` now logs uploads, image creations, mirror creations and
+  pool imports over 2 ms, and `MP4_PROFILE_SLOW` (read with totk-pc-recomp `tools/prof_report.py`'s map loader) showed
+  the rest. Three causes, three changes:
+  - Seven streamed light and fog volumes (3D BC6H/BC1, 1408x256x1008, 173 and 346 MiB, in virtual pools) were
+    deswizzled whole at first use (1.2 GB, 535 ms) and whole again the next frame when the game mapped more tiles
+    (259 ms). `vk_texture.c` `upload_part` copies only the block-linear blocks over pages written since the last upload;
+    on a first upload over virtual pool shadow storage the blocks nothing wrote are zero and come from a zeroed slab.
+    Texture upload in that frame: 566 to 18 ms. `MP4_TEX_PARTIAL=0` restores the whole uploads; screenshots of both
+    agree, and `--probe-vkmem` checks the block box reads.
+  - Each pool import (`VK_EXT_external_memory_host`) cost about 50 ms on the NVIDIA driver from the import of the
+    1.8 GiB asset pool on until the first frame of play, whatever its size: half in
+    `vkGetMemoryHostPointerPropertiesEXT`, half in `vkAllocateMemory`; that frame imports 14 pools. The memory types
+    are now asked once (`import_pool`). The allocation half remains (about 25 ms each, 3 ms later in play); a
+    submission referencing the large import did not change it. Importing neighbouring pools as one allocation would.
+  - The first sync of that 1.8 GiB pool's VRAM mirror took 180 ms in write-watch queries: each full answer of 1,024
+    pages was followed by a query from the start of the range again. The queries now continue after the last page
+    (`ww_next`): 27 ms. `MP4_MEMORY=verify` compared about 123,000 mirror pages every 60 frames through play with no
+    mismatch.
+  Result in the same play: worst frame 1,545 to 501 ms, the next 483 to 359 ms (the GPU copying the 1.8 GiB pool into
+  its mirror), frames over 100 ms in the first minute 20 to 6, 1% low 19 to 33 fps.
 
 ## Shared core
 
@@ -317,6 +338,8 @@ The copy of 2026-11-02 (Phase 1), from fe3h-pc-recomp @ `47ef991`, 176 text file
 - 90 files that differ only by the rename of `fe3h` to `mp4` and `FE3H_` to `MP4_` (the executable, settings file,
   environment variables, window): the kernel, SVCs, IPC, fs, RomFS, audio renderer, the rest of the NVN and Vulkan
   code, the menu, the build tools. Each file's first line says which.
+- Changed since (2026-11-05): `runtime/tex_deswizzle.c` gained `tex_bl_read_box` (a box read the partial uploads use);
+  the rest of the change is in files that already differed.
 - Rewritten for this game: the tables listed under Phase 1. Not taken: FE3H's overrides, patch tables, expected-hash
   files, installer and release tools.
 

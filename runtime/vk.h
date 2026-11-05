@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; declares vk_mem_newer_pages.
 // From totk-pc-recomp runtime/vk.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Vulkan-internal header of the graphics layer. Host code only; the guest never sees it.
 #pragma once
@@ -225,6 +225,9 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
 // The same answer from per-epoch write-watch snapshots of 2 MiB regions: no system call once the regions were queried in
 // this epoch (a guest submission). For checks that may see writes made during the epoch one epoch late.
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now);
+// The pages of the range newer than since as a bitmap (bit i: page i from addr & ~0xfff), from the generation table as
+// the last check over the range left it; returns how many.
+uint64_t vk_mem_newer_pages(uint64_t addr, uint64_t size, uint32_t since, uint8_t *bits);
 void vk_mem_snap_stats(uint64_t *checks, uint64_t *calls, uint64_t *untracked);   // since the last call
 
 // Upload batch: one command buffer on gfx_queue that texture uploads and texel copies record into. begin/end bracket

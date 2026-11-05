@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_pipeline.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the front face is mirrored for the lower-left window origin.
+// From fe3h-pc-recomp runtime/vk_pipeline.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the front face is mirrored for the lower-left window origin; --prepare-shaders also builds the pipelines of pipeline-keys.bin.
 // From totk-pc-recomp runtime/vk_pipeline.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Graphics and compute pipelines and descriptor layouts of the Vulkan replay. The op-stream replay (vk_exec.c)
 // collects NVN state into a VkPipeState and asks for the pipeline of each draw; this file maps that state to Vulkan,

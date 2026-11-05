@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/tex_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/tex_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; checks tex_bl_read_box.
 // From totk-pc-recomp runtime/tex_probe.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // mp4.exe --probe-vkmem: texture memory checks. The CPU part: block-linear copies against an
 // independent reference, ASTC void-extent blocks, and the NVN -> VkFormat table against GPU0. The GPU part:
@@ -150,6 +150,27 @@ static int check_box(const nvn_texdesc *d, unsigned lv, unsigned layer) {
         if (nvn_swizzle(d, lv, layer, lin, rb, want)) { printf("probe-vkmem: FAIL box swizzle\n"); return 1; }
         if (nvn_texels_box(d, lv, layer, x, y, z, wb, h, store, box, pitch, 0) || memcmp(store, want, L.size)) {
             printf("probe-vkmem: FAIL box write format %#x level %u layer %u box %u,%u,%u %ux%u\n", d->format, lv, layer, x, y, z, wb, h);
+            return 1;
+        }
+        g_cases++;
+        free(box), free(ref);
+    }
+    // tex_bl_read_box (vk_texture.c upload_part): whole GOB columns from x0 = 64 * k, any rows and slices
+    if (nvn_deswizzle(d, lv, layer, store, lin, rb)) { printf("probe-vkmem: FAIL box deswizzle\n"); return 1; }
+    uint32_t gobs = (rb + 63) / 64;
+    for (int k = 0; k < 8; k++) {
+        uint32_t g0 = rnd8() % gobs, x0 = g0 * 64, x1 = (g0 + 1 + rnd8() % (gobs - g0)) * 64;
+        uint32_t wb = (x1 < rb ? x1 : rb) - x0, y = rnd8() % rows, h = 1 + rnd8() % (rows - y);
+        uint32_t z = sl > 1 ? rnd8() % sl : 0, nz = sl > 1 ? 1 + rnd8() % (sl - z) : 1;
+        size_t n = (size_t)wb * h * nz;
+        uint8_t *box = malloc(n), *ref = malloc(n);
+        for (uint32_t zz = 0; zz < nz; zz++)
+            for (uint32_t r = 0; r < h; r++)
+                memcpy(ref + ((size_t)zz * h + r) * wb, lin + ((size_t)(z + zz) * rows + y + r) * rb + x0, wb);
+        tex_bl_read_box(store + base, box, wb, rb, rows, th, td, x0, wb, y, h, z, nz);
+        if (memcmp(box, ref, n)) {
+            printf("probe-vkmem: FAIL block box read format %#x level %u layer %u box %u,%u,%u %ux%ux%u\n", d->format, lv, layer,
+                   x0, y, z, wb, h, nz);
             return 1;
         }
         g_cases++;

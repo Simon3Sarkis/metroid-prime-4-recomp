@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the host pointer memory types are asked once, write-watch queries resume after the last page, vk_mem_newer_pages, and perf lines for slow imports and mirror creations.
 // From totk-pc-recomp runtime/vk_memory.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Vulkan memory of the graphics layer: NVN memory pools as Vulkan
 // buffers, the virtual-pool page table, GPU address resolution, page write generations for re-uploads, and the
@@ -114,15 +114,27 @@ static int memory_type(const VkCtx *c, uint32_t bits, VkMemoryPropertyFlags want
 }
 
 // CPU-visible storage: the guest pages themselves become the buffer's memory (VK_EXT_external_memory_host).
+// The memory types a host pointer can be imported as are asked once (vkGetMemoryHostPointerPropertiesEXT) and kept:
+// all guest memory is one kind of allocation, so the answer is the same for every pool, and on the NVIDIA driver the
+// query cost as much as the import itself, about 25 ms per pool through the save load once the 1.8 GiB asset pool was
+// imported (14 pools in the first frame of play: 350 ms of it). A pool whose import fails with the kept types asks again.
+static uint32_t host_bits;   // memory types of the first successful query; 0 not asked yet
+static int import_pool_q(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, int ask);
 static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
+    if (import_pool_q(c, r, addr, size, !host_bits)) return 1;
+    return host_bits && import_pool_q(c, r, addr, size, 1);
+}
+static int import_pool_q(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, int ask) {
     if (!p_host_props)
         p_host_props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c->device, "vkGetMemoryHostPointerPropertiesEXT");
     uint64_t al = c->min_imported_host_alignment ? c->min_imported_host_alignment : 0x1000;
     r->import_lo = addr & ~(al - 1);
     r->import_hi = (addr + size + al - 1) & ~(al - 1);
-    uint64_t n = r->import_hi - r->import_lo;
-    VkMemoryHostPointerPropertiesEXT hp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    VkResult res = p_host_props ? p_host_props(c->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    uint64_t n = r->import_hi - r->import_lo, q0 = qpc();
+    VkMemoryHostPointerPropertiesEXT hp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
+                                           .memoryTypeBits = host_bits};
+    VkResult res = !ask ? VK_SUCCESS
+                 : p_host_props ? p_host_props(c->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                (void *)(uintptr_t)r->import_lo, &hp)
                                 : VK_ERROR_EXTENSION_NOT_PRESENT;
     if (res != VK_SUCCESS || !hp.memoryTypeBits) {
@@ -133,6 +145,7 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n,
                              .usage = pool_usage(c), .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    uint64_t q1 = qpc();
     if ((res = vkCreateBuffer(c->device, &bi, NULL, &r->buf)) != VK_SUCCESS) {
         rt_log("vk: pool %#llx: vkCreateBuffer for the import failed (%d)", (unsigned long long)addr, (int)res);
         return 0;
@@ -154,8 +167,9 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
                                            .pHostPointer = (void *)(uintptr_t)r->import_lo};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &im, .allocationSize = n,
                                .memoryTypeIndex = (uint32_t)type};
+    uint64_t q2 = qpc(), q3 = 0;
     if ((res = vkAllocateMemory(c->device, &ai, NULL, &r->mem)) != VK_SUCCESS ||
-        (res = vkBindBufferMemory(c->device, r->buf, r->mem, 0)) != VK_SUCCESS) {
+        (q3 = qpc(), res = vkBindBufferMemory(c->device, r->buf, r->mem, 0)) != VK_SUCCESS) {
         rt_log("vk: pool %#llx+%#llx: host memory import failed (%d)", (unsigned long long)addr, (unsigned long long)size, (int)res);
         if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
         vkDestroyBuffer(c->device, r->buf, NULL);
@@ -164,6 +178,12 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
         return 0;
     }
     InterlockedIncrement(&n_imports);
+    if (ask) host_bits = hp.memoryTypeBits;
+    uint64_t q4 = qpc();
+    if ((rt_trace & RT_TRACE_PERF) && qpc_ms(q4 - q0) > 2.0)   // MP4_TRACE=perf: imports over 2 ms
+        rt_log("perf: import %#llx+%#llx: host pointer properties %.2f ms, buffer %.2f, allocate %.2f, bind %.2f",
+               (unsigned long long)r->import_lo, (unsigned long long)n, qpc_ms(q1 - q0), qpc_ms(q2 - q1), qpc_ms(q3 - q2),
+               qpc_ms(q4 - q3));
     return 1;
 }
 
@@ -592,6 +612,16 @@ static uint32_t reg_max[RT_ADDRESS_LIMIT >> REG_SHIFT];
 // mirror summary, all consumers together; the queries that found written pages (they also flush TLBs) apart.
 static uint64_t ww_calls, ww_bytes, ww_ticks, ww_dirty_calls, ww_dirty_ticks, ww_pages;
 
+// A full answer (sizeof gen_pages / sizeof *gen_pages pages) may have left written pages: the loops below ask again
+// from just past the last page reported (GetWriteWatch lists pages in address order, and the reset cleared those it
+// listed), not from the start of the range. Asking from the start again rescanned the whole range each time: the first
+// mirror sync of the 1.8 GiB asset pool, freshly loaded (about 475,000 written pages, 460 answers), took 180 ms.
+static uint64_t ww_next(uint64_t n, uint64_t *lo) {
+    if (n < sizeof gen_pages / sizeof *gen_pages) return 0;
+    *lo = gen_pages[n - 1] + (1ull << GEN_PAGE_SHIFT);
+    return 1;
+}
+
 static uint64_t ww_query(uint64_t addr, uint64_t size) {
     uint64_t t0 = qpc();
     uint64_t n = mem_written_pages(addr, size, gen_pages, sizeof gen_pages / sizeof *gen_pages);
@@ -657,8 +687,8 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) 
     uint32_t g = ++gen_now;
     int tracked = 1, frozen = 1;
     for (uint64_t a = lo & ~((1ull << REG_SHIFT) - 1); a < hi && frozen; a += 1ull << REG_SHIFT) frozen = mem_frozen(a);
-    while (!frozen) {
-        uint64_t n = ww_query(lo, hi - lo);
+    for (uint64_t q = lo; !frozen && q < hi;) {
+        uint64_t n = ww_query(q, hi - q);
         if (n == UINT64_MAX) {
             static volatile LONG said;
             if (InterlockedIncrement(&said) <= 5)
@@ -668,7 +698,7 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) 
             break;
         }
         for (uint64_t k = 0; k < n; k++) stamp_page(gen_pages[k], g);
-        if (n < sizeof gen_pages / sizeof *gen_pages) break;   // a full answer may have left pages for the next call
+        if (!ww_next(n, &q)) break;   // a full answer may have left pages for the next call
     }
     int changed = 0;
     for (uint64_t a = lo; tracked && a < hi && !changed; a += 1ull << GEN_PAGE_SHIFT) {
@@ -708,11 +738,11 @@ static uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
         uint64_t a = r << SNAP_SHIFT, b = (k + 1) << SNAP_SHIFT;
         int tracked = 1;
         if (!g) g = ++gen_now;
-        for (;;) {
-            uint64_t n = ww_query(a, b - a);
+        for (uint64_t q = a; q < b;) {
+            uint64_t n = ww_query(q, b - q);
             if (n == UINT64_MAX) { tracked = 0; break; }
             for (uint64_t j = 0; j < n; j++) stamp_page(gen_pages[j], g);
-            if (n < sizeof gen_pages / sizeof *gen_pages) break;
+            if (!ww_next(n, &q)) break;
         }
         calls++;
         for (uint64_t j = r; j <= k; j++) {
@@ -727,6 +757,23 @@ static uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
         r = k + 1;
     }
     return calls;
+}
+
+// Sets bit i of bits for each page i of [addr & ~0xfff, addr+size) whose write generation is newer than since, from
+// the table alone: the caller's vk_mem_changed or vk_mem_changed_snap over the range has stamped what the OS saw.
+// Returns the pages set.
+uint64_t vk_mem_newer_pages(uint64_t addr, uint64_t size, uint32_t since, uint8_t *bits) {
+    uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull, n = 0;
+    AcquireSRWLockShared(&gen_lock);
+    for (uint64_t a = lo; a < hi; a += 1ull << GEN_PAGE_SHIFT) {
+        uint32_t *s = gen_slot(a, 0);
+        if (s && *s > since) {
+            uint64_t i = (a - lo) >> GEN_PAGE_SHIFT;
+            bits[i >> 3] |= (uint8_t)(1u << (i & 7)), n++;
+        }
+    }
+    ReleaseSRWLockShared(&gen_lock);
+    return n;
 }
 
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now) {
@@ -816,12 +863,13 @@ static uint64_t page_hi(const PoolRec *r) { return (r->lo + r->size + 0xfff) & ~
 
 // gen_lock held exclusively. 0: the range is not write-watched.
 static int query_stamp(uint64_t lo, uint64_t hi, uint32_t g) {
-    for (;;) {
-        uint64_t n = ww_query(lo, hi - lo);
+    for (uint64_t q = lo; q < hi;) {
+        uint64_t n = ww_query(q, hi - q);
         if (n == UINT64_MAX) return 0;
         for (uint64_t k = 0; k < n; k++) stamp_page(gen_pages[k], g);
-        if (n < sizeof gen_pages / sizeof *gen_pages) return 1;
+        if (!ww_next(n, &q)) return 1;
     }
+    return 1;
 }
 
 void vk_mem_dirty_submit(void) {
@@ -1089,7 +1137,7 @@ static void refuse(PoolRec *r, int why, const char *what) {
 // Replay thread: the pool's mirror on its first buffer use.
 static void mirror_create(PoolRec *r) {
     VkCtx *c = vk_ctx();
-    uint64_t n = r->import_hi - r->import_lo;
+    uint64_t n = r->import_hi - r->import_lo, t0 = qpc(), t1 = 0;
     r->mstate = MS_REFUSED;
     __atomic_add_fetch(&mirror_gen, 1, __ATOMIC_RELEASE);
     if (r->kind != POOL_IMPORT || !r->buf || !n) return;
@@ -1117,6 +1165,7 @@ static void mirror_create(PoolRec *r) {
     for (uint64_t k = r0; k <= r1; k++) untracked |= snap_untracked[k];
     r->mgen = gen_now;   // the whole-range copy below holds every write observed so far
     ReleaseSRWLockExclusive(&gen_lock);
+    t1 = qpc();
     if (untracked) return refuse(r, MR_UNTRACKED, "its range is not write-watched");
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = pool_usage(c),
                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
@@ -1141,6 +1190,11 @@ static void mirror_create(PoolRec *r) {
     r->mstate = MS_ON;
     range_add(&pend, &npend, &cpend, r, 0, n);
     mrep.first_n++, mrep.first_bytes += n;
+    uint64_t t2 = qpc();
+    if ((rt_trace & RT_TRACE_PERF) && qpc_ms(t2 - t0) > 2.0)   // MP4_TRACE=perf: mirror creations over 2 ms
+        rt_log("perf: mirror of pool %#llx+%#llx (%.1f MiB): %.2f ms (write-watch snapshot %.2f, allocation %.2f)",
+               (unsigned long long)r->import_lo, (unsigned long long)n, n / 1048576.0, qpc_ms(t2 - t0), qpc_ms(t1 - t0),
+               qpc_ms(t2 - t1));
     InterlockedIncrement64(&m_live_n);
     InterlockedAdd64(&m_live_bytes, (LONG64)n);
 }

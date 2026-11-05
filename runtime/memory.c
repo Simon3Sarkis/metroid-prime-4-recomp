@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; SetHeapSize refuses a size it cannot grant with OutOfMemory; shadow reservations for virtual pools mapped from CPU-visible pools.
+// From fe3h-pc-recomp runtime/memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; SetHeapSize refuses a size it cannot grant with OutOfMemory; shadow reservations for virtual pools mapped from CPU-visible pools; adds mem_is_shadow.
 // From totk-pc-recomp runtime/memory.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; MapMemory also takes stacks from module data (FE3H).
 // Adapted from MacNativeGames games/totk/runtime/services.c and loader.c @ b75be8c (MIT, Copyright (c) 2026
 // MacNativeGames contributors), and LAS Recomp runtime/main.c and platform/windows.c @ da35b83 (MIT, Copyright (c)
@@ -328,6 +328,13 @@ int mem_shadow_commit(uint64_t addr, uint64_t size) {
     return VirtualAlloc((void *)(uintptr_t)addr, size, MEM_COMMIT, PAGE_READWRITE) != NULL;
 }
 void mem_shadow_release(uint64_t addr) { VirtualFree((void *)(uintptr_t)addr, 0, MEM_RELEASE); }
+// 1 when [addr, addr+size) lies in one shadow reservation: committed as zero pages, so a page nothing wrote (no write
+// generation, vk_memory.c) holds zeros (vk_texture.c upload_part).
+int mem_is_shadow(uint64_t addr, uint64_t size) {
+    for (int i = 0; i < nshadow; i++)
+        if (addr >= shadow_lo[i] && addr + size <= shadow_hi[i] && addr + size >= addr) return 1;
+    return 0;
+}
 
 // Adapted from LAS Recomp runtime/platform/windows.c:40-63 @ da35b83 (MIT, Copyright (c) 2026 Peiikai): GetWriteWatch
 // with the reset flag. A range inside one watched reservation (stack and heap block, or alias region) only.

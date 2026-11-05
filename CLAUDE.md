@@ -80,7 +80,9 @@ of the paks' `MTRL`/`SVGM` assets, the update's patch pak included); the release
 which the installer prepares from the player's files (`docs/installer.md`, "Shader list"). Regenerate the list after
 playing new areas. The pipelines play built ship the same way (`build/pipeline-list.bin`, `tools/prepare_shaders.py
 --make-pipeline-list` from `pipeline-keys.bin`, built by `--prepare-shaders`; "Pipeline list" there), which took a fresh
-install's skipped draws from 2,247 to 75.
+install's skipped draws from 2,247 to 75. The save-load hitch went from 1.5 s to 0.5 s (`docs/plan.md`, "The save-load
+hitch": partial light-volume uploads, one host-pointer query, write-watch queries that resume); what remains is the
+per-pool import cost on NVIDIA and the GPU copy of the 1.8 GiB asset pool into its mirror.
 
 ## Open questions
 

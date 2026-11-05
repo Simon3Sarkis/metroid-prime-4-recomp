@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/tex_deswizzle.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/tex_deswizzle.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; adds tex_bl_read_box.
 // From totk-pc-recomp runtime/tex_deswizzle.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied unchanged.
 // Tegra X1 block-linear <-> linear copies.
 // Ported from MacNativeGames games/totk/third_party/d2r_gfx/gfx/tex/nvn_deswizzle.c @ b75be8cf (MIT, Copyright (c) 2026 jhaizhou); comments translated, the copy loop split out as tex_bl_copy.
@@ -67,6 +67,26 @@ void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, ui
             for (int s = 0; x < row_bytes; s++, x += 16) {   // a partial GOB at the row's end
                 uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16;
                 if (to_linear) memcpy(row + x, g + seg[s], n); else memcpy(g + seg[s], row + x, n);
+            }
+        }
+}
+
+// tex_bl_copy (to linear) of a box: bytes [x0, x0+wb) of rows [y0, y0+h) of slices [z0, z0+nz), x0 a multiple of 64
+// (a GOB column), into lin with pitch bytes per row and h rows per slice.
+void tex_bl_read_box(const uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, unsigned th,
+                     unsigned td, uint32_t x0, uint32_t wb, uint32_t y0, uint32_t h, uint32_t z0, uint32_t nz) {
+    static const uint32_t seg[4] = {0, 32, 256, 288};
+    uint64_t block = 512ull << th << td;
+    for (uint32_t z = 0; z < nz; z++)
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *row = lin + ((size_t)z * h + y) * pitch;
+            const uint8_t *g = bl + nvn_bl_offset(x0, y0 + y, z0 + z, row_bytes, rows, th, td);
+            uint32_t x = 0;
+            for (; x + 64 <= wb; x += 64, g += block)
+                for (int s = 0; s < 4; s++) memcpy(row + x + 16 * s, g + seg[s], 16);
+            for (int s = 0; x < wb; s++, x += 16) {
+                uint32_t n = wb - x < 16 ? wb - x : 16;
+                memcpy(row + x, g + seg[s], n);
             }
         }
 }

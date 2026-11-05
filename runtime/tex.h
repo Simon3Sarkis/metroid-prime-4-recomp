@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/tex.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/tex.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; declares tex_bl_read_box.
 // From totk-pc-recomp runtime/tex.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // CPU-side texture code: block-linear <-> linear copies, ASTC decode, NVN format -> VkFormat. Vulkan memory and
 // the texture objects are in vk_memory.c and vk_texture.c.
@@ -32,6 +32,8 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer, uin
 // The copy loop on its own, for callers that know the level geometry (bl points at the level's first byte).
 void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, uint32_t slices,
                  unsigned th, unsigned td, int to_linear);
+void tex_bl_read_box(const uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, unsigned th,
+                     unsigned td, uint32_t x0, uint32_t wb, uint32_t y0, uint32_t h, uint32_t z0, uint32_t nz);
 
 // ---- tex_astc.c (LAS Recomp runtime/nvn/astc.c, MIT) ----
 // ASTC LDR 2D to RGBA8, bit-exact with astcenc's 8-bit decode. blocks: row-major 16-byte blocks covering
