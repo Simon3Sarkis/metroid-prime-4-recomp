@@ -25,6 +25,7 @@
  "phase.prepare.translator": "Installing the shader translator",
  "phase.prepare.seed": "Reading the shaders from the game data",
  "phase.prepare.translate": "Translating the shaders",
+ "phase.prepare.pipelines": "Building the pipelines play met",
  "phase.prepare.libraries": "Building the shaders for the graphics driver",
  "phase.prepare.pack": "Packing the shader cache into one file",
  "phase.cleanup.ini": "Writing mp4.ini",

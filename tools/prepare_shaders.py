@@ -22,6 +22,13 @@ dropped only at preparation time):
 
     python tools/prepare_shaders.py --make-list build/shader-list.bin build/v131072/shader-answers.bin [more...]
 
+The pipeline list is the same for pipelines: the records of pipeline-keys.bin (runtime/vk_pipeline.c "pipeline keys":
+the render state of each pipeline play built, its shaders named by input id, a hash of the code hash and the answers),
+again no game code. Preparing merges it into the build's pipeline-keys.bin before mp4.exe runs, and --prepare-shaders
+builds every record once, so a fresh install starts with the pipelines play met already built:
+
+    python tools/prepare_shaders.py --make-pipeline-list build/pipeline-list.bin build/v131072/pipeline-keys.bin [more...]
+
 Preparing a build (Python 3.14 for compression.zstd: .venv-py314 or the installer's embeddable Python):
 
     python tools/prepare_shaders.py build/v131072 --list build/shader-list.bin [--romfs DIR] [--no-run] [--keep-seed]
@@ -39,6 +46,8 @@ ANS_MAGIC, PRG_MAGIC = b'TOTKSANS', b'TOTKSPRG'
 ANS_REC = 4 + 32 + 32 + 147 + 1                            # gfx_shader.c ANS_REC
 LIST_PRIORITY = 1                                          # shader-prepared.bin: warm-up (0 title, 2 other)
 BUNDLED_LIST = ROOT / 'data' / 'shader-list.bin'           # release folder layout (tools/make_release.py)
+BUNDLED_PIPELINES = ROOT / 'data' / 'pipeline-list.bin'
+KEY_MAGIC, KEY_VERSION, KEY_REC = b'TOTKPKEY', 3, 424       # vk_pipeline.c KeysHeader, KEYS_VERSION, sizeof(KeyRec)
 
 
 def read_records(path):
@@ -76,6 +85,62 @@ def make_list(out, sources):
     return 0
 
 
+def read_keys(path):
+    """The records of a pipeline keys file (pipeline-keys.bin or a pipeline list): [bytes of KEY_REC]."""
+    b = Path(path).read_bytes()
+    if len(b) < 16 or b[:8] != KEY_MAGIC:
+        raise SystemExit(f'{path}: not a pipeline keys file')
+    version, size = struct.unpack_from('<II', b, 8)
+    if version != KEY_VERSION or size != KEY_REC:
+        raise SystemExit(f'{path}: keys version {version}, record size {size}; this tool reads {KEY_VERSION} and {KEY_REC}')
+    return [b[o:o + KEY_REC] for o in range(16, len(b) - KEY_REC + 1, KEY_REC)]
+
+
+def write_keys(path, recs):
+    tmp = Path(str(path) + '.tmp')
+    with open(tmp, 'wb') as f:
+        f.write(KEY_MAGIC + struct.pack('<II', KEY_VERSION, KEY_REC))
+        for r in recs:
+            f.write(r)
+    tmp.replace(path)
+
+
+def union_keys(sources):
+    """The records of the files in order, each distinct record once (the runtime deduplicates by the same bytes)."""
+    seen, recs = set(), []
+    for src in sources:
+        for r in read_keys(src):
+            if r not in seen:
+                seen.add(r)
+                recs.append(r)
+    return recs
+
+
+def make_pipeline_list(out, sources):
+    recs = union_keys(sources)
+    write_keys(out, recs)
+    print(f'pipeline list: {len(recs)} pipelines from {len(sources)} file(s) -> {out}')
+    return 0
+
+
+def merge_pipelines(build, pipelines):
+    """The list's records added to the build's pipeline-keys.bin; its own records (an update over a played install)
+    stay first. A keys file of another version is replaced, as mp4.exe would rewrite it."""
+    keys = build / 'pipeline-keys.bin'
+    own = []
+    if keys.is_file():
+        try:
+            own = read_keys(keys)
+        except SystemExit as e:
+            print(f'{e}; replaced by the list', flush=True)
+    listed = read_keys(pipelines)
+    have = set(own)
+    added = [r for r in dict.fromkeys(listed) if r not in have]
+    if added or not keys.is_file():
+        write_keys(keys, own + added)
+    print(f'{len(listed)} listed pipelines: {len(added)} added to {len(own)} in pipeline-keys.bin', flush=True)
+
+
 def prepare(a):
     sys.path.insert(0, str(ROOT / 'tools'))
     from shader_inventory import programs   # needs Python 3.14 (compression.zstd)
@@ -96,6 +161,9 @@ def prepare(a):
         for body in progs.values():
             f.write(body)
     write_records(out / 'seed-answers.bin', recs)
+    pipelines = a.pipelines or (BUNDLED_PIPELINES if BUNDLED_PIPELINES.is_file() else None)
+    if pipelines:
+        merge_pipelines(out, pipelines)
     print(f'{len(listed)} listed variants of {len(want)} programs: {len(recs)} variants of {len(progs)} programs found '
           f'in the game ({len(want) - len(progs)} programs not); inventory {t1 - t0:.1f} s', flush=True)
     if a.no_run:
@@ -115,11 +183,21 @@ def main():
     ap.add_argument('--romfs', type=Path, help='merged RomFS directory with romfs.bin and index.json '
                                                '(default build/extracted/<version>/romfs)')
     ap.add_argument('--list', type=Path, help=f'the shader list (default {BUNDLED_LIST.relative_to(ROOT)})')
+    ap.add_argument('--pipelines', type=Path, help='the pipeline list merged into pipeline-keys.bin (default '
+                                                   f'{BUNDLED_PIPELINES.relative_to(ROOT)} when there is one)')
     ap.add_argument('--no-run', action='store_true', help='write the seed files only')
     ap.add_argument('--keep-seed', action='store_true', help='keep the seed files after mp4.exe ran')
     ap.add_argument('--make-list', type=Path, metavar='OUT', help='write a list from the answers files given after it')
-    ap.add_argument('sources', type=Path, nargs='*', help='with --make-list: shader-answers.bin files')
+    ap.add_argument('--make-pipeline-list', type=Path, metavar='OUT',
+                    help='write a pipeline list from the pipeline-keys.bin files given after it')
+    ap.add_argument('sources', type=Path, nargs='*', help='with --make-list: shader-answers.bin files; with '
+                                                          '--make-pipeline-list: pipeline-keys.bin files')
     a = ap.parse_args()
+    if a.make_pipeline_list:
+        sources = ([a.build] if a.build else []) + a.sources
+        if not sources:
+            ap.error('--make-pipeline-list needs at least one pipeline-keys.bin')
+        return make_pipeline_list(a.make_pipeline_list, sources)
     if a.make_list:
         sources = ([a.build] if a.build else []) + a.sources
         if not sources:

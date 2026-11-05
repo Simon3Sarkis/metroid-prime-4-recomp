@@ -580,6 +580,10 @@ class Compile(Step):
 # --prepare-shaders: every listed variant is translated into shader-cache/ and built into the driver's cache, so a scene
 # met for the first time does not wait for its shaders. tools/pack_shader_cache.py then folds the cache into one file.
 # A dev checkout without build/shader-list.bin skips both; the shaders are then translated as they are met in play.
+# The pipeline list (data/pipeline-list.bin, the pipelines play built, render state and shader input ids only) goes to
+# the same tool, which merges it into pipeline-keys.bin; --prepare-shaders then builds every listed pipeline into
+# pipeline-cache.bin and the driver's cache, and each boot's prewarm finds them there. Without it the pipelines are
+# built as they are met in play, and their draws are skipped meanwhile (2,247 in a scripted first-area play).
 TRANSLATED = re.compile(r'gfx_shader: prepare: (\d+) of (\d+) pairs')
 
 # The cinematics are H.264, decoded by openh264 (runtime/ov_movie.c h264_lib, which loads OPENH264_DLL next to
@@ -634,12 +638,15 @@ def prepare_shaders(ctx, dest):
             rep.progress('prepare', 'translate', int(m.group(1)), int(m.group(2)), 'shaders')
         elif 'listed variants' in line:
             rep.progress('prepare', 'translate', force=True)
+        elif 'listed pipelines' in line:
+            rep.progress('prepare', 'pipelines', force=True)
         elif 'gfx_shader: prepared' in line or 'stage library prebuild' in line:
             rep.progress('prepare', 'libraries', force=True)
 
     rep.progress('prepare', 'seed', force=True)
     code, log = run_tool(ctx, 'prepare', layout.tools / 'prepare_shaders.py',
-                         [dest, '--romfs', dest / 'romfs', '--list', layout.shader_list], parse)
+                         [dest, '--romfs', dest / 'romfs', '--list', layout.shader_list,
+                          *(['--pipelines', layout.pipeline_list] if layout.pipeline_list else [])], parse)
     if code or not (dest / 'shader-prepared.bin').is_file():
         raise InstallError('prepare.shaders_failed', code=code, log=str(log))
     # One shader-cache.pack instead of four files per shader (about 140,000 after preparing): mp4.exe reads the pack
@@ -656,9 +663,10 @@ class Prepare(Step):
     def key(self, ctx):
         layout = ctx.layout
         tools = [layout.tools / n for n in ('prepare_shaders.py', 'shader_inventory.py', 'pack_shader_cache.py')]
-        return fingerprint('prepare-mp4-3', ctx.keys['compile'], layout.xlate, layout.xlate.with_suffix('.id'),
+        return fingerprint('prepare-mp4-4', ctx.keys['compile'], layout.xlate, layout.xlate.with_suffix('.id'),
                            OPENH264_SHA256, 'openh264' if openh264_wanted(ctx) else 'no openh264',
-                           *([layout.shader_list] if layout.shader_list else []), *tools)
+                           *([layout.shader_list] if layout.shader_list else []),
+                           *([layout.pipeline_list] if layout.pipeline_list else []), *tools)
 
     def current(self, ctx, record):
         xlate = ctx.dest / ctx.layout.xlate.name

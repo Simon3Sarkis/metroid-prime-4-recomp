@@ -20,7 +20,9 @@ cached in toolchain/release-dl/ and checked against the sha256 in PINS; a mismat
     bin/       mp4_xlate.exe (+ .id), hactool.exe, SDL3.dll (upstream), libopus-0.dll, ninja.exe
     recomp/, tools/, installer/, licenses/, THIRD_PARTY_NOTICES.md, mp4.ini.example
     data/      shader-list.bin (--shader-list): the shader variants play met, hashes and binding answers only, which the
-               installer prepares from the player's own files (tools/prepare_shaders.py); not in the repository
+               installer prepares from the player's own files (tools/prepare_shaders.py); not in the repository.
+               pipeline-list.bin (--pipeline-list, when there is one): the pipelines play built, render state and
+               shader input ids only, which the installer builds once at preparation
     VERSION    the repository's VERSION plus the commit, 0.1.0+973c626; the installer's release string
     MP4-Setup.exe  installer/launcher/launcher.c built with llvm/ (-mwindows): starts python/pythonw.exe -m installer.gui
 
@@ -109,6 +111,7 @@ TOOLS_FILES = ['build_game.py', 'build_shaders.py', 'check_content.py', 'extract
                'extract_romfs.py', 'hostmem.py', 'pack_shader_cache.py', 'prepare_shaders.py', 'romfs_index.py',
                'shader_inventory.py']   # hostmem: gen.py sizes its workers by free RAM
 SHADER_LIST = None   # main(): --shader-list
+PIPELINE_LIST = None   # main(): --pipeline-list, None without one
 TOOLS_DIRS = ['data']   # tools/data/: expected hashes
 RUNTIME_SUFFIXES = {'.h', '.inc', '.ico'}   # .ico: the installer window icon
 
@@ -364,6 +367,8 @@ def build_sources(out):
     copy_tree(ROOT / 'installer', out / 'installer', lambda r: '__pycache__' in r or r.startswith('launcher/'))
     (out / 'data').mkdir(exist_ok=True)
     shutil.copy2(SHADER_LIST, out / 'data' / 'shader-list.bin')
+    if PIPELINE_LIST:
+        shutil.copy2(PIPELINE_LIST, out / 'data' / 'pipeline-list.bin')
     shutil.copy2(ROOT / 'mp4.ini.example', out / 'mp4.ini.example')
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES.md', out / 'THIRD_PARTY_NOTICES.md')
     (out / 'VERSION').write_text(version() + '\n', encoding='utf-8')
@@ -526,9 +531,16 @@ def main():
     ap.add_argument('--shader-list', type=Path, default=MAIN_ROOT / 'build' / 'shader-list.bin',
                     help='the shader list the release ships as data/shader-list.bin (default build/shader-list.bin, '
                          'made by tools/prepare_shaders.py --make-list from the shader-answers.bin of play)')
+    ap.add_argument('--pipeline-list', type=Path, default=MAIN_ROOT / 'build' / 'pipeline-list.bin',
+                    help='the pipeline list the release ships as data/pipeline-list.bin (default build/pipeline-list.bin '
+                         'when it exists, made by tools/prepare_shaders.py --make-pipeline-list from the '
+                         'pipeline-keys.bin of play)')
     args = ap.parse_args()
-    global SHADER_LIST
+    global SHADER_LIST, PIPELINE_LIST
     SHADER_LIST = args.shader_list.resolve()
+    PIPELINE_LIST = args.pipeline_list.resolve() if args.pipeline_list.is_file() else None
+    if not args.prove and not PIPELINE_LIST:
+        print(f'{args.pipeline_list}: no pipeline list; the release ships none (pipelines are built in play)')
     if not args.prove and not SHADER_LIST.is_file():
         sys.exit(f'{SHADER_LIST}: no shader list (tools/prepare_shaders.py --make-list)')
     out = args.out.resolve()

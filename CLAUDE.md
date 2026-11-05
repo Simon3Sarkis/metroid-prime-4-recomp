@@ -78,7 +78,9 @@ Shaders: `tools/shader_inventory.py` reads every program from the RomFS (the `SN
 of the paks' `MTRL`/`SVGM` assets, the update's patch pak included); the release ships a list of the variants play met
 (`build/shader-list.bin`, made with `tools/prepare_shaders.py --make-list` from `shader-answers.bin`, never committed),
 which the installer prepares from the player's files (`docs/installer.md`, "Shader list"). Regenerate the list after
-playing new areas.
+playing new areas. The pipelines play built ship the same way (`build/pipeline-list.bin`, `tools/prepare_shaders.py
+--make-pipeline-list` from `pipeline-keys.bin`, built by `--prepare-shaders`; "Pipeline list" there), which took a fresh
+install's skipped draws from 2,247 to 75.
 
 ## Open questions
 

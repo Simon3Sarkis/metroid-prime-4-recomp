@@ -162,3 +162,23 @@ python tools/prepare_shaders.py --make-list build/shader-list.bin build/v131072/
 `tools/make_release.py --shader-list` takes it (default `build/shader-list.bin`). On a fresh copy of the build, the list
 of one play of the first area (34,812 variants of 2,826 programs) took the translations in play from 1,883 to 14 and the
 draws that waited for a shader from 24,549 to 30, and shortened the longest frame of the save load from 2.4 to 1.6 s.
+
+## Pipeline list
+
+A draw whose Vulkan pipeline is not built yet is skipped while a worker builds it (`runtime/vk_pipeline.c`). Each
+build appends a record to `pipeline-keys.bin` (the render state, the shaders named by input id, a hash of the code hash
+and the answers; no game code), and every boot builds the file's records before the guest starts. A fresh install has
+no such file, so the release carries one: `data/pipeline-list.bin`, records in the same layout, which
+`tools/prepare_shaders.py --pipelines` merges into the install's `pipeline-keys.bin` (the player's own records stay)
+before `mp4.exe --prepare-shaders` builds every record into `pipeline-cache.bin` and the driver's cache. The release
+ships it when there is one; without it the pipelines are built in play.
+
+```
+python tools/prepare_shaders.py --make-pipeline-list build/pipeline-list.bin build/v131072/pipeline-keys.bin [more files]
+```
+
+`tools/make_release.py --pipeline-list` takes it (default `build/pipeline-list.bin`). Measured 2026-11-05 on a copy
+prepared from the shader list, the same scripted first-area play: without the list 1,548 pipelines were built in play
+and 2,247 draws skipped while they built; with the list of 27,286 records (26,732 built at preparation in 4 s, the rest
+name shaders the shader list does not hold) 53 and 75, and the boot waited 1.5 s for the prewarm. The longest frames
+of that play are texture uploads at the save load, which the list does not change.

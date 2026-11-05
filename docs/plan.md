@@ -288,6 +288,13 @@ the null decoder). No host AAC decoder needed.
   instead of 1,883, and draws waiting for a shader fell from 24,549 to 30. Frame pacing in gameplay was already alike
   (translation runs in the background, a draw waits or is skipped); what remains are draws skipped while their
   pipelines link (about 2,000 in both), which the list does not cover.
+- Pipeline list (2026-11-05). Those skips are pipelines a fresh install has never built: the stage libraries the
+  preparation warms are keyed by vertex output unions it did not know, so most draws still waited for a worker. The
+  machinery for a played install already existed (`pipeline-keys.bin`, built at every boot); the release now ships its
+  records as `data/pipeline-list.bin`, and `--prepare-shaders` builds them (before the libraries, so these get the
+  unions) into `pipeline-cache.bin` and the driver cache. Same scripted play on a fresh prepared copy: 2,247 draws
+  skipped without the list, 75 with it; 1,548 pipelines built in play, 53; boot waited 1.5 s for the prewarm. Details
+  in `docs/installer.md`, "Pipeline list".
 
 ## Shared core
 

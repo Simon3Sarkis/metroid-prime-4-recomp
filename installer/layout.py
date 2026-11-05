@@ -15,6 +15,7 @@ Release (docs/installer.md "Release layout"), root = the unpacked folder:
     bin/                    mp4_xlate.exe (+ mp4_xlate.id), hactool.exe, ninja.exe, SDL3.dll, libopus-0.dll
     data/shader-list.bin    the shader variants play met (tools/prepare_shaders.py; MP4 change: shipped with the release,
                             not kept in the repository)
+    data/pipeline-list.bin  the pipelines play built (MP4; optional, like the shader list built from play)
     mp4.ini.example
     VERSION                 the release version, one line
     temp/                   the default temp folder (created)
@@ -22,8 +23,8 @@ Release (docs/installer.md "Release layout"), root = the unpacked folder:
 Dev mode, root = a repository checkout (no python/python.exe): build/py314-embed/py/python.exe (the embeddable
 Python the release ships, with the same packages), else this Python; toolchain/llvm-mingw-*/ and toolchain/deps-mingw;
 runtime/ as the sources with build/install-rtlib/libmp4rt.a (tools/build_game.py --make-runtime-lib --out
-build/install-rtlib); MSYS2 UCRT64 ninja.exe; toolchain/hactool; build/xlate/mp4_xlate.exe; build/shader-list.bin when
-there is one; build/install-temp. The version is VERSION with -dev and the commit: 0.1.0-dev+973c626.
+build/install-rtlib); MSYS2 UCRT64 ninja.exe; toolchain/hactool; build/xlate/mp4_xlate.exe; build/shader-list.bin and
+build/pipeline-list.bin when there are; build/install-temp. The version is VERSION with -dev and the commit: 0.1.0-dev+973c626.
 """
 import os
 import subprocess
@@ -63,6 +64,7 @@ class Layout:
     ini_example: Path | None = None
     temp: Path | None = None
     shader_list: Path | None = None   # MP4: None when there is none (dev); the shaders are then translated in play
+    pipeline_list: Path | None = None   # MP4: None when there is none; the pipelines are then built in play
 
     @property
     def clang(self):
@@ -90,6 +92,10 @@ class Layout:
         return [str(p) for p in need if not p.exists()]
 
 
+def optional(path):
+    return path if path.is_file() else None
+
+
 def is_release(root):
     return (root / 'python' / ('python' + EXE)).is_file()
 
@@ -106,7 +112,8 @@ def release_layout(root):
         ninja=root / 'bin' / ('ninja' + EXE), hactool=root / 'bin' / ('hactool' + EXE),
         xlate=root / 'bin' / ('mp4_xlate' + EXE),
         dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll'),
-        ini_example=root / 'mp4.ini.example', temp=root / 'temp', shader_list=root / 'data' / 'shader-list.bin')
+        ini_example=root / 'mp4.ini.example', temp=root / 'temp', shader_list=root / 'data' / 'shader-list.bin',
+        pipeline_list=optional(root / 'data' / 'pipeline-list.bin'))
 
 
 def dev_layout(root):
@@ -134,7 +141,8 @@ def dev_layout(root):
         dlls=tuple(deps / 'bin' / n for n in ('SDL3.dll', 'libopus-0.dll', 'libiconv-2.dll') if (deps / 'bin' / n).is_file())
         if deps == UCRT.parent else tuple(sorted((deps / 'bin').glob('*.dll'))),
         ini_example=root / 'mp4.ini.example', temp=root / 'build' / 'install-temp',
-        shader_list=(root / 'build' / 'shader-list.bin') if (root / 'build' / 'shader-list.bin').is_file() else None)
+        shader_list=optional(root / 'build' / 'shader-list.bin'),
+        pipeline_list=optional(root / 'build' / 'pipeline-list.bin'))
 
 
 def find(root=None):

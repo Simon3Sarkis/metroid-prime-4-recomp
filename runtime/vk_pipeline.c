@@ -2621,20 +2621,20 @@ static DWORD WINAPI warm_builder(void *arg) {
 
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]);
 
-void vk_pipeline_prewarm(void) {
-    const char *gpu = rt_config()->gpu;
+// Builds every record of pipeline-keys.bin; boot 1 then starts the boot's stage library prebuild (lb_start), boot 0
+// (mp4.exe --prepare-shaders) does not. Returns the pipelines built.
+static uint32_t prewarm_keys(int boot) {
     uint32_t pr_hist[16] = {0}, fs_hist[4] = {0};   // library state of the recorded pipelines (lb_start)
-    if (!A.on || (gpu && !strcmp(gpu, "null"))) return;
     if (!cfg_bool("MP4_PIPE_PREBUILD")) {   // prebuild_start logs the off case
-        if (ensure_init()) lb_start(pr_hist, fs_hist);
-        return;
+        if (boot && ensure_init()) lb_start(pr_hist, fs_hist);
+        return 0;
     }
     double t0 = now_ms();
     K.warm = 1;
     if (!ensure_init() || !K.file_n) {
         rt_log("vk_pipeline: prewarm: no pipeline keys (%s)", K.path[0] ? K.path : "<none>");
-        if (P.ready) lb_start(pr_hist, fs_hist);
-        return;
+        if (boot && P.ready) lb_start(pr_hist, fs_hist);
+        return 0;
     }
     const KeyRec *r = (const KeyRec *)K.file;
     size_t n = K.file_n, m = 0;
@@ -2642,7 +2642,7 @@ void vk_pipeline_prewarm(void) {
     const GfxShader **sh = calloc(2 * n, sizeof *sh);
     if (!ids || !sh) {
         free(ids), free(sh);
-        return;
+        return 0;
     }
     for (size_t i = 0; i < n; i++) {
         memcpy(ids[m++], r[i].vs, 32);
@@ -2715,10 +2715,18 @@ void vk_pipeline_prewarm(void) {
     rt_log("vk_pipeline: prewarm: %zu records in %s: %u pipelines built, %u failed, %u already built, %u dropped "
            "(shader neither cached nor stored); shaders %.0f ms, pipelines %.0f ms on %d threads, total %.0f ms",
            n, K.path, K.built, K.failed, known, dropped, t1 - t0, now_ms() - t1, nt, now_ms() - t0);
+    uint32_t built = K.built;
     free(K.file);
     K.file = NULL;
     ReleaseSRWLockExclusive(&P.lock);
-    lb_start(pr_hist, fs_hist);
+    if (boot) lb_start(pr_hist, fs_hist);
+    return built;
+}
+
+void vk_pipeline_prewarm(void) {
+    const char *gpu = rt_config()->gpu;
+    if (!A.on || (gpu && !strcmp(gpu, "null"))) return;
+    prewarm_keys(1);
 }
 
 // ensure_init's hook: without a prewarm (MP4_PIPE_PREBUILD=0, or the device came up first elsewhere) the records
@@ -3125,9 +3133,17 @@ static void lb_warm_prepared(const char *dir) {
 }
 
 // mp4.exe --prepare-shaders (tools/prepare_shaders.py): the device sets the translator's host answers (they are in every
-// cache key), the seed next to mp4.exe is translated on every core, then every prepared variant's stage library or
-// compute pipeline is built once into the driver's disk cache (lb_warm_prepared). No game runs.
+// cache key), the seed next to mp4.exe is translated on every core, then the pipelines of pipeline-keys.bin are built
+// as the boot prewarm builds them (the installer puts the release's pipeline list there) and every prepared variant's
+// stage library or compute pipeline once into the driver's disk cache (lb_warm_prepared), and pipeline-cache.bin is
+// written. No game runs. The keys come before the libraries because building them sets the vertex output unions the
+// libraries are keyed by. Without the list a fresh install skipped 2,247 draws of a scripted first-area play while
+// their pipelines built (1,548 built in play); with a list of 27,286 records, 63 (51).
 int vk_pipeline_prepare_shaders(void) {
+    // Keys as at boot: keys_open (in ensure_init) reads pipeline-keys.bin only with background builds on, and
+    // prebuild_start drops the records unless the prewarm owns them.
+    A.on = 1;
+    K.warm = 1;
     if (!ensure_init()) {
         fprintf(stderr, "prepare-shaders: no Vulkan device\n");
         return 1;
@@ -3141,8 +3157,15 @@ int vk_pipeline_prepare_shaders(void) {
     const char *pe = cfg_get("MP4_PREWARM_XLATE");   // no fixed default: half the CPUs, at most 16, when unset
     int procs = pe && *pe ? atoi(pe) : cpus / 2 > 16 ? 16 : cpus / 2;
     int rc = gfx_shader_prepare_seed(dir, cpus, procs < 1 ? 1 : procs);
-    if (!rc) lb_warm_prepared(dir);
-    return rc;
+    if (rc) return rc;
+    double t0 = now_ms();
+    size_t listed = K.file_n;
+    uint32_t built = prewarm_keys(0);
+    if (listed)
+        printf("prepare-shaders: %u of %zu listed pipelines built in %.0f ms\n", built, listed, now_ms() - t0);
+    lb_warm_prepared(dir);
+    vk_pipeline_save();
+    return 0;
 }
 
 // mp4.exe --warm-shaders: every variant of shader-prepared.bin built into the driver's disk cache again from the shader

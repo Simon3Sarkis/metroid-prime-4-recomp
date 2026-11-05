@@ -25,6 +25,7 @@
  "phase.prepare.translator": "Установка транслятора шейдеров",
  "phase.prepare.seed": "Чтение шейдеров из данных игры",
  "phase.prepare.translate": "Трансляция шейдеров",
+ "phase.prepare.pipelines": "Сборка графических конвейеров, встреченных в игре",
  "phase.prepare.libraries": "Сборка шейдеров для драйвера видеокарты",
  "phase.prepare.pack": "Упаковка кэша шейдеров в один файл",
  "phase.cleanup.ini": "Запись mp4.ini",
