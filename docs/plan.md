@@ -316,6 +316,25 @@ the null decoder). No host AAC decoder needed.
     mismatch.
   Result in the same play: worst frame 1,545 to 501 ms, the next 483 to 359 ms (the GPU copying the 1.8 GiB pool into
   its mirror), frames over 100 ms in the first minute 20 to 6, 1% low 19 to 33 fps.
+- The rest of that hitch (2026-11-05, later). Upload batches now carry GPU timestamps (`MP4_TRACE=perf`: batches over
+  5 ms of GPU time, with their staging bytes), which corrected two guesses: the next frame's wait was not the mirror
+  copy, and the replay's own GPU work in those frames stayed under a millisecond.
+  - Pool imports share one `vkAllocateMemory` per 64 MiB chunk of the guest heap (`vk_memory.c` arenas; each pool keeps
+    its own buffer, bound at its offset). The first frame of play's 14 imports at ~25 ms each are gone. Chunks whose
+    import fails (some hold pages the game made inaccessible) leave their pools importing alone. `MP4_IMPORT_ARENA=0`.
+  - The light volumes (12 of them, 2.6 GB, 3D BC in virtual pools) get their images when the game registers them in a
+    texture pool, during the load, and those in shadow storage are zeroed then from a device-local zero buffer
+    (`vk_texture.c` `vk_texture_register`, `zero_image`); their first upload copies only written blocks. Zeroing them
+    at the first upload had cost an upload batch 112 ms of GPU time in the first frame of play, and creating them then
+    a further wait for the new allocations. `MP4_TEX_EARLY=0`.
+  - Lazy mirrors (each 64 KiB chunk copied at its first binding) were built for the 1.8 GiB pool and timed alike once
+    the above was in; `MP4_MEMORY=verify` found one mismatching page in ~11 million in each of two lazy runs and none
+    without, cause not found, so `MP4_MIRROR_LAZY` stays 0. Allocating that pool's mirror early made no difference
+    and was dropped.
+  Result: the first frame of play 501 to about 207 ms (two runs: 207, 208). The cost moved into the load: one frame of
+  the loading screen at about 220-280 ms (the light volumes' residency and zeroing). 1% low in the first minute 33 to
+  46 fps, frames over 100 ms 6 to 4. Left: about 5 s into play the game streams 179 textures in one frame (an upload
+  batch of 69 MiB and 120 ms of GPU time, a 120-180 ms frame); the zero fill under the loading screen.
 
 ## Shared core
 
@@ -338,8 +357,9 @@ The copy of 2026-11-02 (Phase 1), from fe3h-pc-recomp @ `47ef991`, 176 text file
 - 90 files that differ only by the rename of `fe3h` to `mp4` and `FE3H_` to `MP4_` (the executable, settings file,
   environment variables, window): the kernel, SVCs, IPC, fs, RomFS, audio renderer, the rest of the NVN and Vulkan
   code, the menu, the build tools. Each file's first line says which.
-- Changed since (2026-11-05): `runtime/tex_deswizzle.c` gained `tex_bl_read_box` (a box read the partial uploads use);
-  the rest of the change is in files that already differed.
+- Changed since (2026-11-05): `runtime/tex_deswizzle.c` gained `tex_bl_read_box` (a box read the partial uploads use)
+  and `runtime/vk_exec_xfer.c` passes the bytes its copies touch to the VRAM mirror; the rest of the change is in files
+  that already differed.
 - Rewritten for this game: the tables listed under Phase 1. Not taken: FE3H's overrides, patch tables, expected-hash
   files, installer and release tools.
 

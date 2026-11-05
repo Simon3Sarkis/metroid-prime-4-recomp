@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_exec_xfer.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged.
+// From fe3h-pc-recomp runtime/vk_exec_xfer.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied unchanged; mirror picks pass the bytes they touch (VK_MEM_PICK).
 // From totk-pc-recomp runtime/vk_exec_xfer.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); adds SetCopyImageStride (OP_COPY_IMG_STRIDE) for FE3H.
 // Transfers of the Vulkan op-stream replay: buffer and texture copies, texture
 // clears, event signals, counter reports and conditional rendering. vk_exec.c calls vk_exec_op_xfer for these ops.
@@ -412,7 +412,7 @@ static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *
                   (unsigned long long)addr, (unsigned long long)*size);
         return 0;
     }
-    VK_MEM_PICK(m);
+    VK_MEM_PICK(m, *size);
     *span = m;
     *c = (VkBufferImageCopy){.bufferOffset = m.offset, .bufferRowLength = (uint32_t)(row / (uint64_t)s->bpb) * (uint32_t)s->bw,
                              .bufferImageHeight = (uint32_t)(img / row) * (uint32_t)s->bh, .imageSubresource = sub_layers(s),
@@ -490,8 +490,8 @@ static void copy_b2b(VkExec *ex, const p_copy_b2b *p) {
         }
         uint64_t n = left < s.avail ? left : s.avail;
         if (n > d.avail) n = d.avail;
-        VK_MEM_PICK(s);
-        VK_MEM_PICK(d);
+        VK_MEM_PICK(s, n);
+        VK_MEM_PICK(d, n);
         if (s.buffer == d.buffer && s.offset < d.offset + n && d.offset < s.offset + n) {
             warn_once(W_OVERLAP, "buffer copy %#llx -> %#llx overlaps within one buffer: skipped",
                       (unsigned long long)p->src, (unsigned long long)p->dst);
@@ -531,7 +531,7 @@ static void clear_buf(VkExec *ex, const p_clear_buf *p) {
         uint64_t n = left < d.avail ? left : d.avail & ~3ull;
         if (!n) break;
         if (!started) vk_exec_pass_end(ex), vk_exec_barrier(ex), started = 1;
-        VK_MEM_PICK(d);
+        VK_MEM_PICK(d, n);
         vkCmdFillBuffer(ex->cb, d.buffer, d.offset, n, p->value);
         vk_mem_gpu_wrote(&d, n);
         ex->recorded++;

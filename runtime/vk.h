@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; declares vk_mem_newer_pages.
+// From fe3h-pc-recomp runtime/vk.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; declares vk_mem_newer_pages; VK_MEM_USE and VK_MEM_PICK take the bytes used.
 // From totk-pc-recomp runtime/vk.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Vulkan-internal header of the graphics layer. Host code only; the guest never sees it.
 #pragma once
@@ -182,10 +182,12 @@ void vk_mem_dirty_submit(void);                   // vk_sync_submit, under its l
 // vk_sync.c records the copies the mirrors' first accesses queued (vk_mem_mirror_pending) into a prologue command
 // buffer with vk_mem_mirror_prologue and submits it right before each part.
 extern int vk_mirror_on;
-void vk_mem_use(VkMemSpan *sp);
-void vk_mem_pick(VkMemSpan *sp);
-#define VK_MEM_USE(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp)); } while (0)
-#define VK_MEM_PICK(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp)); } while (0)
+// size: the bytes from sp.offset the GPU may access (a lazy mirror loads them first); UINT64_MAX when unknown (to the
+// end of the pool).
+void vk_mem_use(VkMemSpan *sp, uint64_t size);
+void vk_mem_pick(VkMemSpan *sp, uint64_t size);
+#define VK_MEM_USE(sp, size) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp), (size)); } while (0)
+#define VK_MEM_PICK(sp, size) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp), (size)); } while (0)
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
 // Uniform blocks as of the submit call (vk_usnap.c): vk_exec_record copies the uniform ranges a submission binds before
 // it records, ubo bindings take the copy (0: not copied, bind memory), GPU writes of the replay drop the copies they touch.

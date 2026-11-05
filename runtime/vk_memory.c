@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the host pointer memory types are asked once, write-watch queries resume after the last page, vk_mem_newer_pages, and perf lines for slow imports and mirror creations.
+// From fe3h-pc-recomp runtime/vk_memory.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the host pointer memory types are asked once, write-watch queries resume after the last page, vk_mem_newer_pages, shared heap imports (arenas), lazy mirrors (off by default), and perf lines for slow imports, mirror creations and upload batches.
 // From totk-pc-recomp runtime/vk_memory.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Vulkan memory of the graphics layer: NVN memory pools as Vulkan
 // buffers, the virtual-pool page table, GPU address resolution, page write generations for re-uploads, and the
@@ -54,7 +54,8 @@ typedef struct PoolRec {
     uint64_t lo, size;                 // GPU address range of the pool
     uint64_t import_lo, import_hi;     // POOL_IMPORT: the imported host range (aligned outwards)
     VkBuffer buf;
-    VkDeviceMemory mem;                // POOL_IMPORT
+    VkDeviceMemory mem;                // POOL_IMPORT with an import of its own
+    struct Arena *arena;               // POOL_IMPORT: the shared import its buffer is bound into (arena_get), or NULL
     VmaAllocation alloc;               // POOL_PHYS
     VPage *pt;                         // POOL_VIRT: size / 64 KiB entries
     uint64_t npages;
@@ -73,6 +74,8 @@ typedef struct PoolRec {
     uint32_t mgen;                     // gen_lock: every page write stamped up to this generation is in the mirror
                                        // (or in a copy queued before its next use)
     uint64_t fl_lo, fl_hi;             // flush_lock: nvnMemoryPoolFlushMappedRange bytes not copied yet (fl_hi 0: none)
+    uint32_t *lsub;                    // lazy mirror (mirror_load): per 64 KiB chunk the submission that loaded it, 0 not
+                                       // yet; NULL: the whole range was copied at creation
 } PoolRec;
 
 static void mirror_forget(PoolRec *r);   // pool_lock exclusive: off the mirrored list
@@ -111,6 +114,82 @@ static int memory_type(const VkCtx *c, uint32_t bits, VkMemoryPropertyFlags want
     for (uint32_t i = 0; i < c->mem_props.memoryTypeCount; i++)
         if (bits >> i & 1) return (int)i;
     return -1;
+}
+
+// ---- shared imports (arenas)
+// A host memory import cost about 25 ms in vkAllocateMemory on the NVIDIA driver however small the range, from the
+// import of the 1.8 GiB asset pool until play (3 ms later on), and the first frame of play imports 14 pools of 0.1 to
+// 6 MiB: 350 ms. Small pools in the guest heap are bound into a shared import of their 64 MiB-aligned chunk of the
+// heap instead (one vkAllocateMemory per chunk, kept while a pool uses it), each with a buffer of its own over its
+// range, so a pool's buffer and offsets are what they were. The heap is committed once, at boot, before any pool
+// (memory.c mem_set_heap_size), so every page of a chunk stays importable. A pool that crosses a chunk boundary, a
+// large one, and every pool outside the heap keep an import of their own. MP4_IMPORT_ARENA=0 turns it off.
+#define ARENA_SHIFT 26
+#define ARENA_MAX_POOL (16ull << 20)
+typedef struct Arena {
+    struct Arena *next;
+    uint64_t lo, hi;
+    uint32_t type;
+    VkDeviceMemory mem;                // VK_NULL_HANDLE: the import failed, pools of the chunk import alone
+    long refs;
+} Arena;
+static Arena *arenas;
+static SRWLOCK arena_lock = SRWLOCK_INIT;
+static volatile LONG n_arenas;
+
+// The arena for [lo, hi) with memory type `type`, its reference taken; NULL when the range cannot share one.
+static Arena *arena_get(VkCtx *c, uint64_t lo, uint64_t hi, uint32_t type) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("MP4_IMPORT_ARENA");
+    uint64_t hlo, hhi;
+    if (!on || hi - lo > ARENA_MAX_POOL || !mem_heap_range(&hlo, &hhi)) return NULL;
+    uint64_t a = lo >> ARENA_SHIFT << ARENA_SHIFT, b = a + (1ull << ARENA_SHIFT);
+    if (a < hlo) a = hlo;
+    if (b > hhi) b = hhi;
+    if (lo < a || hi > b) return NULL;
+    AcquireSRWLockExclusive(&arena_lock);
+    Arena *e = arenas;
+    while (e && (e->lo != a || e->hi != b || e->type != type)) e = e->next;
+    if (!e && (e = calloc(1, sizeof *e))) {
+        e->lo = a, e->hi = b, e->type = type;
+        mem_thaw(a, b - a);   // the import may need write access to the pages
+        uint64_t t0 = qpc();
+        VkImportMemoryHostPointerInfoEXT im = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                                               .pHostPointer = (void *)(uintptr_t)a};
+        VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &im, .allocationSize = b - a,
+                                   .memoryTypeIndex = type};
+        VkResult res = vkAllocateMemory(c->device, &ai, NULL, &e->mem);
+        if (res != VK_SUCCESS) {
+            e->mem = VK_NULL_HANDLE;
+            rt_log("vk: shared import of heap %#llx+%#llx failed (%d): its pools import alone", (unsigned long long)a,
+                   (unsigned long long)(b - a), (int)res);
+        } else {
+            InterlockedIncrement(&n_arenas);
+            if (rt_trace & RT_TRACE_PERF)
+                rt_log("perf: shared import of heap %#llx+%#llx: %.2f ms", (unsigned long long)a, (unsigned long long)(b - a),
+                       qpc_ms(qpc() - t0));
+        }
+        e->next = arenas, arenas = e;
+    }
+    if (e && e->mem) e->refs++;
+    else e = NULL;
+    ReleaseSRWLockExclusive(&arena_lock);
+    return e;
+}
+
+// A pool bound into e is gone (its buffer destroyed): the last one frees the import.
+static void arena_put(VkCtx *c, Arena *e) {
+    AcquireSRWLockExclusive(&arena_lock);
+    if (--e->refs == 0) {
+        Arena **pp = &arenas;
+        while (*pp != e) pp = &(*pp)->next;
+        *pp = e->next;
+        vkFreeMemory(c->device, e->mem, NULL);
+        InterlockedDecrement(&n_arenas);
+        free(e);
+    }
+    ReleaseSRWLockExclusive(&arena_lock);
 }
 
 // CPU-visible storage: the guest pages themselves become the buffer's memory (VK_EXT_external_memory_host).
@@ -162,12 +241,23 @@ static int import_pool_q(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size, int
         r->buf = VK_NULL_HANDLE;
         return 0;
     }
+    uint64_t q2 = qpc(), q3 = 0;
+    Arena *e = !(r->import_lo & (req.alignment - 1)) ? arena_get(c, r->import_lo, r->import_hi, (uint32_t)type) : NULL;
+    if (e) {
+        if ((res = vkBindBufferMemory(c->device, r->buf, e->mem, r->import_lo - e->lo)) == VK_SUCCESS) {
+            r->arena = e;
+            if (ask) host_bits = hp.memoryTypeBits;
+            return 1;
+        }
+        rt_log("vk: pool %#llx: binding into the shared import failed (%d): it imports alone", (unsigned long long)addr,
+               (int)res);
+        arena_put(c, e);
+    }
     VkImportMemoryHostPointerInfoEXT im = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                            .pHostPointer = (void *)(uintptr_t)r->import_lo};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &im, .allocationSize = n,
                                .memoryTypeIndex = (uint32_t)type};
-    uint64_t q2 = qpc(), q3 = 0;
     if ((res = vkAllocateMemory(c->device, &ai, NULL, &r->mem)) != VK_SUCCESS ||
         (q3 = qpc(), res = vkBindBufferMemory(c->device, r->buf, r->mem, 0)) != VK_SUCCESS) {
         rt_log("vk: pool %#llx+%#llx: host memory import failed (%d)", (unsigned long long)addr, (unsigned long long)size, (int)res);
@@ -254,8 +344,10 @@ static PoolRec *phys_find(const pool_t *key) {
 
 static void destroy_rec(VkCtx *c, PoolRec *r) {
     if (r->mbuf) vmaDestroyBuffer(c->vma, r->mbuf, r->malloc_);
+    free(r->lsub);
     if (r->buf) vkDestroyBuffer(c->device, r->buf, NULL);
     if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
+    if (r->arena) arena_put(c, r->arena);
     if (r->alloc) vmaFreeMemory(c->vma, r->alloc);
     free(r->pt);
     free(r);
@@ -1021,6 +1113,8 @@ static void dirty_frame(uint64_t frame) {
 enum { MR_BUDGET, MR_UNTRACKED, MR_OVERLAP, MR_ALLOC, MR_N };
 
 int vk_mirror_on;
+#define MCHUNK (64ull << 10)          // lazy mirror chunk (mirror_load)
+static int mirror_lazy;                // MP4_MIRROR_LAZY
 static int mirror_verify;
 static int mirror_gap = 2;             // pre-snap: hot pools at most this many 2 MiB regions apart share one query
 static PoolRec **mlist;                // pool_lock: mirrored pools by import_lo
@@ -1056,6 +1150,7 @@ static void mirror_mode(int discrete) {
     }
     vk_mirror_on = mode > 0;
     mirror_verify = mode == 2;
+    mirror_lazy = cfg_bool("MP4_MIRROR_LAZY");
     const char *g = cfg_get("MP4_MIRROR_GAP");
     mirror_gap = g && *g ? atoi(g) : 2;
     if (mirror_gap < 0) mirror_gap = 0;
@@ -1188,8 +1283,9 @@ static void mirror_create(PoolRec *r) {
     ReleaseSRWLockExclusive(&pool_lock);
     r->acc_sub = msub;
     r->mstate = MS_ON;
-    range_add(&pend, &npend, &cpend, r, 0, n);
-    mrep.first_n++, mrep.first_bytes += n;
+    mrep.first_n++;
+    if (!mirror_lazy || !(r->lsub = calloc((n + MCHUNK - 1) / MCHUNK, sizeof *r->lsub)))
+        range_add(&pend, &npend, &cpend, r, 0, n), mrep.first_bytes += n;
     uint64_t t2 = qpc();
     if ((rt_trace & RT_TRACE_PERF) && qpc_ms(t2 - t0) > 2.0)   // MP4_TRACE=perf: mirror creations over 2 ms
         rt_log("perf: mirror of pool %#llx+%#llx (%.1f MiB): %.2f ms (write-watch snapshot %.2f, allocation %.2f)",
@@ -1231,6 +1327,30 @@ static void mirror_retire(void *arg) {
     destroy_rec(vk_ctx(), arg);
 }
 
+// Lazy mirrors (MP4_MIRROR_LAZY=1; off by default): a new mirror copies nothing; each 64 KiB chunk is copied the first
+// time a binding, copy or fill covers it (mirror_load, from vk_mem_use and vk_mem_pick with the bytes they use), and
+// the CPU-write syncs skip chunks not loaded yet (their load copies the guest bytes as they are then). A binding of
+// unknown size loads from its offset to the end of the pool. Made for the 1.8 GiB asset pool, whose whole-range copy
+// at its first use seemed to cost the first frame of play 300 ms; that wait turned out to be new allocations becoming
+// resident and the light volumes' zero fill (vk_texture.c vk_texture_register), and with those moved into the load
+// lazy and whole copies time alike (first frame of play 142 and 305 ms lazy, 207 and 208 ms whole). It stays off
+// because MP4_MEMORY=verify found one mismatching page in about 11 million compared in each of two lazy runs (small
+// CPU_UNCACHED pools) and none in a whole-copy run of 12 million; the cause is not found.
+static void mirror_load(PoolRec *r, uint64_t off, uint64_t size) {
+    uint64_t n = r->import_hi - r->import_lo;
+    if (!r->lsub || off >= n || !size) return;
+    uint64_t end = size < n - off ? off + size : n;
+    for (uint64_t c = off / MCHUNK, ce = (end + MCHUNK - 1) / MCHUNK; c < ce;) {
+        if (r->lsub[c]) { c++; continue; }
+        uint64_t c1 = c;
+        while (c1 < ce && !r->lsub[c1]) r->lsub[c1++] = msub;
+        uint64_t a = c * MCHUNK, b = c1 * MCHUNK < n ? c1 * MCHUNK : n;
+        range_add(&pend, &npend, &cpend, r, a, b - a);
+        mrep.first_bytes += b - a;
+        c = c1;
+    }
+}
+
 // Replay thread, the first access of this submission: queues the copies of the pages written since the last sync.
 static void mirror_sync(PoolRec *r) {
     uint64_t t0 = qpc();
@@ -1255,7 +1375,7 @@ static void mirror_sync(PoolRec *r) {
         const uint32_t *ch = gen_chunk[a >> GEN_CHUNK_SHIFT];   // a 2 MiB region lies in one chunk
         if (!ch) continue;
         for (uint64_t x = a; x < b; x += 1ull << GEN_PAGE_SHIFT)
-            if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since)
+            if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since && (!r->lsub || r->lsub[(x - lo) / MCHUNK]))
                 range_add(&pend, &npend, &cpend, r, x - lo, 1ull << GEN_PAGE_SHIFT);
     }
     r->mgen = gen_now;
@@ -1274,18 +1394,20 @@ static void mirror_sync(PoolRec *r) {
     mrep.sync_t += qpc() - t0;
 }
 
-void vk_mem_use(VkMemSpan *sp) {
+void vk_mem_use(VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (r->mstate == MS_NONE) mirror_create(r);
     if (r->mstate != MS_ON) return;
     if (r->acc_sub != msub) mirror_sync(r);
+    mirror_load(r, sp->offset, size);
     sp->buffer = r->mbuf;
 }
 
-void vk_mem_pick(VkMemSpan *sp) {
+void vk_mem_pick(VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON) return;
     if (r->acc_sub != msub) mirror_sync(r);
+    mirror_load(r, sp->offset, size);
     sp->buffer = r->mbuf;
 }
 
@@ -1293,7 +1415,7 @@ int vk_mem_mirror_probe(uint64_t addr) {
     VkMemSpan sp;
     if (!vk_mirror_on || !vk_mem_resolve(addr, 1, &sp) || !sp.pool) return 0;
     mepoch = vk_texture_epoch();
-    vk_mem_use(&sp);
+    vk_mem_use(&sp, UINT64_MAX);
     return ((PoolRec *)sp.pool)->mstate == MS_ON;
 }
 
@@ -1417,6 +1539,10 @@ static void verify_cb(void *arg) {   // completion thread
         }
         for (uint64_t o = 0; o < s->len; o += 1ull << GEN_PAGE_SHIFT) {
             uint64_t a = r->import_lo + s->off + o;
+            if (r->lsub) {   // a lazy mirror's chunk holds guest bytes from its load on
+                uint32_t ls = r->lsub[(s->off + o) / MCHUNK];
+                if (!ls || (int32_t)(ls - j->sub) > 0) { skipped++; continue; }
+            }
             const uint8_t *m = j->map + s->dst + o, *g = (const uint8_t *)(uintptr_t)a;
             pages++;
             if (!memcmp(m, g, 1ull << GEN_PAGE_SHIFT)) continue;
@@ -1450,8 +1576,15 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
         if (ver_i >= nm) ver_i = 0, ver_off = 0;
         PoolRec *r = mlist[ver_i];
         uint64_t size = r->import_hi - r->import_lo;
+        if (r->lsub)   // a lazy mirror: sample loaded chunks only (most of a large pool may never be loaded)
+            while (ver_off < size && !r->lsub[ver_off / MCHUNK]) ver_off = (ver_off / MCHUNK + 1) * MCHUNK;
         if (ver_off >= size) { ver_i++, ver_off = 0; continue; }
         uint64_t len = size - ver_off < left ? size - ver_off : left;
+        if (r->lsub) {   // up to the end of the run of loaded chunks
+            uint64_t e = ver_off;
+            while (e < ver_off + len && r->lsub[e / MCHUNK]) e = (e / MCHUNK + 1) * MCHUNK;
+            if (e - ver_off < len) len = e - ver_off;
+        }
         j->s[j->n++] = (VSample){r, ver_off, len, dst, r->mgen};
         dst += len, left -= len, ver_off += len;
         if (ver_off >= size) ver_i++, ver_off = 0;
@@ -1618,7 +1751,13 @@ typedef struct {
     uint64_t seq;
     Staging *stg;
     int nstg, cap;
+    int qslot;                         // MP4_TRACE=perf: 1 + its timestamp pair in up_qp; 0 none
+    uint64_t submit_qpc, staged, frame;
 } Batch;
+// MP4_TRACE=perf: GPU timestamps at the start and end of each upload batch; retire logs batches whose GPU work took
+// over 5 ms, with the staging bytes they carried and how long after their submission the fence was seen.
+#define UP_QSLOTS 64
+static VkQueryPool up_qp;
 
 enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA };
 typedef struct { int kind; uint64_t handle; VmaAllocation alloc; uint64_t seq, tl; } Dead;
@@ -1662,6 +1801,17 @@ static void retire(VkCtx *c, int wait_all) {
         Batch *b = &inflight[k];
         if (wait_all) vkWaitForFences(c->device, 1, &b->fence, VK_TRUE, UINT64_MAX);
         else if (vkGetFenceStatus(c->device, b->fence) != VK_SUCCESS) break;
+        if (b->qslot) {
+            uint64_t ts[2];
+            if (vkGetQueryPoolResults(c->device, up_qp, (uint32_t)(b->qslot - 1) * 2, 2, sizeof ts, ts, 8,
+                                      VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                double gpu = (double)(ts[1] - ts[0]) * c->props.limits.timestampPeriod / 1e6;
+                if (gpu > 5.0)
+                    rt_log("perf: frame %llu: upload batch %llu: GPU %.1f ms, %.1f MiB staged, fence seen %.1f ms after the submit",
+                           (unsigned long long)b->frame, (unsigned long long)b->seq, gpu, b->staged / 1048576.0,
+                           qpc_ms(qpc() - b->submit_qpc));
+            }
+        }
         free_staging(c, b);
         done_seq = b->seq;
         if (nspare == cap_spare) grow((void **)&spare, &cap_spare, sizeof *spare);
@@ -1720,6 +1870,19 @@ VkCommandBuffer vk_upload_begin(void) {
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(open_b.cb, &bi);
     open_b.seq = ++next_seq;
+    if ((rt_trace & RT_TRACE_PERF) && c->props.limits.timestampComputeAndGraphics) {
+        if (!up_qp) {
+            VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                        .queryCount = UP_QSLOTS * 2};
+            if (vkCreateQueryPool(c->device, &qi, NULL, &up_qp) != VK_SUCCESS) up_qp = VK_NULL_HANDLE;
+        }
+        if (up_qp) {
+            int slot = (int)(open_b.seq % UP_QSLOTS);
+            vkCmdResetQueryPool(open_b.cb, up_qp, (uint32_t)slot * 2, 2);
+            vkCmdWriteTimestamp(open_b.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, up_qp, (uint32_t)slot * 2);
+            open_b.qslot = slot + 1;
+        }
+    }
     vk_crumb(open_b.cb, VK_CRUMB_UPLOAD, open_b.seq);
     open_active = 1;
     return open_b.cb;
@@ -1770,6 +1933,7 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     else {
         if (open_b.nstg == open_b.cap) grow((void **)&open_b.stg, &open_b.cap, sizeof *open_b.stg);
         open_b.stg[open_b.nstg++] = (Staging){b, a};
+        open_b.staged += size;
     }
     return info.pMappedData;
 }
@@ -1782,6 +1946,10 @@ uint64_t vk_upload_flush(int wait) {
     if (c && open_active) {
         for (int i = 0; i < open_b.nstg; i++) vmaFlushAllocation(c->vma, open_b.stg[i].alloc, 0, VK_WHOLE_SIZE);
         vk_crumb(open_b.cb, VK_CRUMB_UPLOAD_END, open_b.seq);
+        if (open_b.qslot)
+            vkCmdWriteTimestamp(open_b.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, up_qp, (uint32_t)(open_b.qslot - 1) * 2 + 1);
+        open_b.submit_qpc = qpc();
+        open_b.frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
         vkEndCommandBuffer(open_b.cb);
         VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &open_b.cb};
         vk_queue_lock();

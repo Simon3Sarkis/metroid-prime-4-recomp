@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; shader image stores are recorded as GPU writes by slot id; textures in a shadowed virtual pool are mirrored from its shadow storage; partial uploads of large block-linear textures (upload_part) and perf lines for slow uploads and image creations.
+// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; shader image stores are recorded as GPU writes by slot id; textures in a shadowed virtual pool are mirrored from its shadow storage; partial uploads of large block-linear textures (upload_part), images made at registration for large CPU-written textures and zeroed then in shadow storage, and perf lines for slow uploads and image creations.
 // From totk-pc-recomp runtime/vk_texture.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only; sampler slots span several pools (FE3H).
 // Vulkan textures of the graphics layer: a VkImage cache keyed by storage
 // GPU address plus descriptor, uploads through staging buffers with block-linear deswizzle and ASTC decode (vk_astc.c),
@@ -60,6 +60,8 @@ typedef struct Tex {
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
     uint32_t up_since;            // set by make_fresh for upload: generation the image's content is as new as
     uint8_t up_part;              // upload may copy only the blocks over pages newer than up_since (upload_part)
+    uint8_t zeroed;               // the image was zeroed at its registration (zero_image): a first partial upload
+                                  // copies only the written blocks
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
 } Tex;
 
@@ -711,6 +713,66 @@ static int upload_full(Tex *e, UpStat *st) {
 // GPU must not have written the image since (gpu_dirty). 0: not applicable, or so much is written that the whole
 // texture goes (upload_full).
 #define PART_MIN_BYTES (16ull << 20)
+// The zeros come from a device-local buffer filled on the GPU (vkCmdFillBuffer, once): a slab in host staging memory
+// sent the 1.2 GB of zero blocks of the first light volume uploads over PCIe, a GPU-side wait of 100 ms and more.
+#define ZERO_MAX (16ull << 20)
+static VkBuffer zero_buf;
+static VmaAllocation zero_alloc;
+
+// The device-local zero buffer (cb records its fill the first time), VK_NULL_HANDLE when it cannot be made.
+static VkBuffer zero_buffer(VkCommandBuffer cb) {
+    if (zero_buf) return zero_buf;
+    static int failed;
+    if (failed) return VK_NULL_HANDLE;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = ZERO_MAX,
+                             .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &zero_buf, &zero_alloc, NULL) != VK_SUCCESS) {
+        zero_buf = VK_NULL_HANDLE, failed = 1;
+        return VK_NULL_HANDLE;
+    }
+    vkCmdFillBuffer(cb, zero_buf, 0, ZERO_MAX, 0);
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+    return zero_buf;
+}
+
+// The whole image zeroed from the zero buffer (vk_texture_register's early images): the rows of blocks of a level-0,
+// single-layer block-linear texture as copy regions. 0 when it does not apply (upload_part then fills the unwritten
+// blocks at the first upload, as before).
+static int zero_image(Tex *e, VkCommandBuffer cb) {
+    const nvn_texdesc *d = &e->t.d;
+    uint32_t row_bytes, rows, slices, bpb;
+    uint64_t base;
+    unsigned th, td;
+    int bw, bh;
+    if (e->pub.levels != 1 || e->pub.layers != 1 || e->f.astc_bw || e->f.expand_rgb || nvn_tex_is_linear(d) ||
+        nvn_deswizzle_geom(d, 0, 0, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || !nvn_fmt_bpb(d->format, &bw, &bh))
+        return 0;
+    uint32_t gx = (row_bytes + 63) / 64, by_rows = 8u << th, bz_sl = 1u << td;
+    uint32_t gy = (rows + by_rows - 1) / by_rows, gz = (slices + bz_sl - 1) / bz_sl;
+    if ((uint64_t)gx * 64 * by_rows * bz_sl > ZERO_MAX) return 0;
+    VkBuffer zb = zero_buffer(cb);
+    VkBufferImageCopy *rz = zb ? calloc((size_t)gy * gz, sizeof *rz) : NULL;
+    if (!rz) return 0;
+    uint32_t wt = d->width, ht = d->target == 0 || d->target == 3 ? 1 : d->height, k = 0;
+    for (uint32_t z = 0; z < gz; z++)
+        for (uint32_t y = 0; y < gy; y++) {
+            uint32_t y0 = y * by_rows, z0 = z * bz_sl;
+            uint32_t h = rows - y0 < by_rows ? rows - y0 : by_rows, nz = slices - z0 < bz_sl ? slices - z0 : bz_sl;
+            uint32_t yt = y0 * (uint32_t)bh, eh = h * (uint32_t)bh;
+            rz[k++] = (VkBufferImageCopy){.bufferRowLength = gx * 64 / bpb * (uint32_t)bw, .bufferImageHeight = eh,
+                                          .imageSubresource = {e->pub.aspect, 0, 0, 1}, .imageOffset = {0, (int32_t)yt, (int32_t)z0},
+                                          .imageExtent = {wt, ht - yt < eh ? ht - yt : eh, nz}};
+        }
+    barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdCopyBufferToImage(cb, zb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, k, rz);
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    free(rz);
+    return 1;
+}
+
 static int upload_part(Tex *e, UpStat *st) {
     static int on = -1;
     if (on < 0) on = cfg_bool("MP4_TEX_PARTIAL");
@@ -727,6 +789,7 @@ static int upload_part(Tex *e, UpStat *st) {
     if (nvn_deswizzle_geom(d, 0, 0, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || base ||
         !nvn_fmt_bpb(d->format, &bw, &bh))
         return 0;
+    int fill = first && !e->zeroed;   // unwritten blocks of a first upload get zeros here
     uint64_t B = 512ull << th << td, size = t->L.size;
     uint32_t gx = (row_bytes + 63) / 64, by_rows = 8u << th, bz_sl = 1u << td;
     uint32_t gy = (rows + by_rows - 1) / by_rows, gz = (slices + bz_sl - 1) / bz_sl;
@@ -753,7 +816,7 @@ static int upload_part(Tex *e, UpStat *st) {
             uint8_t v = dirty[r * gx + x];
             uint32_t x1 = x;
             while (x1 < gx && dirty[r * gx + x1] == v) x1++;
-            if (v || first) {
+            if (v || fill) {
                 nreg++;
                 if (v) {
                     uint32_t wb = (x1 * 64 < row_bytes ? x1 * 64 : row_bytes) - x * 64;
@@ -764,27 +827,29 @@ static int upload_part(Tex *e, UpStat *st) {
             }
             x = x1;
         }
-    uint64_t slab = first && nd < nb ? (uint64_t)gx * 64 * by_rows * bz_sl : 0;   // zeros as wide as a row of blocks
+    uint64_t slab = fill && nd < nb ? (uint64_t)gx * 64 * by_rows * bz_sl : 0;   // zeros as wide as a row of blocks
     VkBufferImageCopy *rg = nreg ? calloc(nreg, sizeof *rg) : NULL;
     if (nreg && !rg) { free(dirty); return 0; }
     VkCommandBuffer cb = vk_upload_begin();
-    VkBuffer sb;
-    uint64_t s0 = kern_now_ns();
-    uint8_t *stg = bytes + slab ? vk_staging(bytes + slab, &sb, NULL) : NULL;
-    uint64_t stage_ns = kern_now_ns() - s0, d0 = kern_now_ns(), off = slab, k = 0;
-    if (slab) memset(stg, 0, slab);
+    VkBuffer sb = VK_NULL_HANDLE, zb = slab && slab <= ZERO_MAX ? zero_buffer(cb) : VK_NULL_HANDLE;
+    VkBufferImageCopy *rz = zb ? calloc(nreg, sizeof *rz) : NULL;
+    if (!rz) zb = VK_NULL_HANDLE;
+    uint64_t s0 = kern_now_ns(), stslab = zb ? 0 : slab;
+    uint8_t *stg = bytes + stslab ? vk_staging(bytes + stslab, &sb, NULL) : NULL;
+    uint64_t stage_ns = kern_now_ns() - s0, d0 = kern_now_ns(), off = stslab, k = 0, kz = 0;
+    if (stslab) memset(stg, 0, stslab);
     for (uint64_t r = 0; r < (uint64_t)gy * gz; r++)
         for (uint32_t x = 0; x < gx;) {
             uint8_t v = dirty[r * gx + x];
             uint32_t x1 = x;
             while (x1 < gx && dirty[r * gx + x1] == v) x1++;
-            if (v || first) {
+            if (v || fill) {
                 uint32_t x0b = x * 64, wb = (x1 * 64 < row_bytes ? x1 * 64 : row_bytes) - x0b;
                 uint32_t y0 = (uint32_t)(r % gy) * by_rows, z0 = (uint32_t)(r / gy) * bz_sl;
                 uint32_t h = rows - y0 < by_rows ? rows - y0 : by_rows, nz = slices - z0 < bz_sl ? slices - z0 : bz_sl;
                 uint32_t xt = x0b / bpb * (uint32_t)bw, yt = y0 * (uint32_t)bh;
                 uint32_t ew = wb / bpb * (uint32_t)bw, eh = h * (uint32_t)bh;
-                VkBufferImageCopy *c = &rg[k++];
+                VkBufferImageCopy *c = !v && zb ? &rz[kz++] : &rg[k++];
                 *c = (VkBufferImageCopy){.imageSubresource = {e->pub.aspect, 0, 0, 1}, .imageOffset = {(int32_t)xt, (int32_t)yt, (int32_t)z0},
                                          .imageExtent = {wt - xt < ew ? wt - xt : ew, ht - yt < eh ? ht - yt : eh, nz}};
                 if (v) {
@@ -798,15 +863,17 @@ static int upload_part(Tex *e, UpStat *st) {
             x = x1;
         }
     uint64_t ds_ns = kern_now_ns() - d0;
-    if (k) {
+    if (k || kz) {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)k, rg);
+        if (k) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)k, rg);
+        if (kz) vkCmdCopyBufferToImage(cb, zb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)kz, rz);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     }
     vk_upload_end();
     free(rg);
+    free(rz);
     free(dirty);
-    *st = (UpStat){.levels = 1, .layers = 1, .total = bytes + slab, .stage_ns = stage_ns, .ds_ns = ds_ns,
+    *st = (UpStat){.levels = 1, .layers = 1, .total = bytes + stslab, .stage_ns = stage_ns, .ds_ns = ds_ns,
                    .blocks = nb, .sent = nd, .part = 1};
     return 1;
 }
@@ -1164,7 +1231,36 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v) {
     s->has_view = v != NULL;
     if (v) s->v = *v;
     else memset(&s->v, 0, sizeof s->v);
+    // Early images (MP4_TEX_EARLY): a texture of 8 MiB or more over CPU-written storage (tex_mirrored: no render
+    // target, whose new image may take another image's content at its creation) gets its image when it is registered,
+    // not at its first draw, and the batch with its first layout transition is submitted at once, so the driver brings the
+    // allocation in while the game is still loading. The first frame of play after the save load drew seven new light
+    // and fog volumes (1.4 GB) and some 600 MiB of other new images at once and waited about 300 ms on its fence while
+    // its GPU work took under a millisecond: the residency of the new allocations.
+    static int early = -1;
+    if (early < 0) early = cfg_bool("MP4_TEX_EARLY");
+    int made = 0;
+    uint64_t t0 = kern_now_ns();
+    if (early && t->mem && t->L.size >= (8ull << 20) && tex_mirrored(t)) {
+        TexKey k;
+        make_key(t, &k);
+        Tex *e = nvn_hm_get(&by_key, &k) ? NULL : entry_of(t);
+        made = e != NULL;
+        // Light volumes in shadow storage: the zeros their unwritten blocks need go in now, during the load, not with
+        // the first upload in the first frame of play (over a gigabyte of copies into tiled 3D images, 100 ms of GPU).
+        if (e && !e->uploaded && e->pub.mirrored && mem_is_shadow(e->pub.addr, t->L.size)) {
+            e->zeroed = (uint8_t)zero_image(e, vk_upload_begin());
+            vk_upload_end();
+        }
+    }
     unlock();
+    if (made) {
+        vk_upload_flush(0);
+        if (rt_trace & RT_TRACE_PERF)
+            rt_log("perf: early image of texture %#llx fmt %#x %ux%ux%u (%.1f MiB) at its registration: %.2f ms",
+                   (unsigned long long)(uintptr_t)t->mem, t->d.format, t->d.width, t->d.height, t->d.depth ? t->d.depth : 1,
+                   t->L.size / 1048576.0, (kern_now_ns() - t0) / 1e6);
+    }
 }
 
 // The entry slot s resolves to, and the view and has_view a caller gets with it (the slot's, with the descriptor's
@@ -1902,6 +1998,7 @@ void vk_texture_shutdown(void) {
         if (by_key.vals[i]) list[n++] = by_key.vals[i];
     for (int i = 0; i < n; i++) destroy_tex(list[i]);
     free(list);
+    if (zero_buf && c) vmaDestroyBuffer(c->vma, zero_buf, zero_alloc), zero_buf = VK_NULL_HANDLE;
     for (uint32_t i = 0; i < samplers.cap; i++)
         if (samplers.vals[i] && c) vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
     free(by_key.keys), free(by_key.vals), free(by_addr.keys), free(by_addr.vals), free(samplers.keys), free(samplers.vals);

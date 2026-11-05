@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/host.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; RT_V143 is always on for this game's SDK generation; adds mem_is_shadow.
+// From fe3h-pc-recomp runtime/host.h @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; RT_V143 is always on for this game's SDK generation; adds mem_is_shadow and mem_heap_range.
 // From totk-pc-recomp runtime/host.h @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Interface of the host runtime: guest memory, modules, kernel, IPC, file system and boot.
 //
@@ -163,6 +163,7 @@ uint64_t mem_shadow_reserve(uint64_t size);               // watched storage bel
 int mem_shadow_commit(uint64_t addr, uint64_t size);       // commits pages of it (zeroed)
 void mem_shadow_release(uint64_t addr);                    // releases a reservation
 int mem_is_shadow(uint64_t addr, uint64_t size);           // the range lies in one shadow reservation
+int mem_heap_range(uint64_t *lo, uint64_t *hi);            // the committed guest heap; 0 before SetHeapSize
 
 // ---- modules (loader.c)
 typedef struct {

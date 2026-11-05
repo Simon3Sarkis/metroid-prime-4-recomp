@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_dump.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; PNGs are turned over for the lower-left window origin.
+// From fe3h-pc-recomp runtime/vk_dump.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; PNGs are turned over for the lower-left window origin; mirror picks pass their size (VK_MEM_PICK).
 // From totk-pc-recomp runtime/vk_dump.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; a state line per pipeline (depth, cull, blend, mask, viewport, vertex layout).
 // MP4_DUMP=<frame>: a frame dump for the Vulkan back end, which RenderDoc cannot capture (it hides
 // VK_EXT_external_memory_host). Between presents frame-1 and frame, the replay's command buffers also copy, after each
@@ -419,7 +419,7 @@ static void buf_snap(VkExec *ex, int pass) {
     if (!bd_size) return;
     VkMemSpan s;
     if (!vk_mem_resolve(bd_addr, bd_size, &s) || s.avail < bd_size) return;
-    VK_MEM_PICK(s);   // the GPU's view of the buffer
+    VK_MEM_PICK(s, UINT64_MAX);   // the GPU's view of the buffer
     BufJob *j = calloc(1, sizeof *j);
     if (!j) rt_fatal("vk_dump: out of memory");
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bd_size,
@@ -888,7 +888,7 @@ static void vb_gpu_snap(VkExec *ex, int draw, int st) {
     uint64_t addr = ex->vbuf[st].address, size = ex->vbuf[st].size < 4096 ? ex->vbuf[st].size : 4096;
     VkMemSpan s;
     if (!dump_vb || !addr || !size || !vk_mem_resolve(addr, size, &s) || s.avail < size) return;
-    VK_MEM_PICK(s);
+    VK_MEM_PICK(s, UINT64_MAX);
     VkBuffer bb;
     VkDeviceSize bo;
     if (vk_exec_vb_bound(st, &bb, &bo) && (bb != s.buffer || bo != s.offset)) {   // copy what the draw read
