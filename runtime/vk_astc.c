@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_astc.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/vk_astc.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; MP4_ASTC_TIME also logs a scratch buffer outside device-local memory.
 // From totk-pc-recomp runtime/vk_astc.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // ASTC textures on the GPU: the MP4_ASTC knob, a compute decoder that turns raw blocks into the RGBA8 image the CPU
 // decoder (tex_astc.c) would have written, and the native ASTC formats where the device samples them itself.
@@ -468,6 +468,14 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
             rt_log("vk: ASTC scratch buffer of %llu bytes failed: texture left undecoded",
                    (unsigned long long)(cap_in + cap_out));
         return 0;
+    }
+    if (t_on > 0) {   // MP4_ASTC_TIME: where the scratch landed (host memory would put every texel over PCIe twice)
+        static volatile long n_host;
+        VkMemoryPropertyFlags mf = 0;
+        vmaGetAllocationMemoryProperties(c->vma, sa, &mf);
+        if (!(mf & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && InterlockedIncrement(&n_host) <= 16)
+            rt_log("vk: ASTC scratch of %.1f MiB is not device-local (memory flags %#x)",
+                   (double)(cap_in + cap_out + cap_bc) / 1048576.0, (unsigned)mf);
     }
     AcquireSRWLockExclusive(&g_lock);
     int need_tab = !G.tab_uploaded;

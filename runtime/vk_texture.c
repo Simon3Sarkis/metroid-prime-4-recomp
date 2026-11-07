@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; shader image stores are recorded as GPU writes by slot id; textures in a shadowed virtual pool are mirrored from its shadow storage; partial uploads of large block-linear textures (upload_part), images made at registration for large CPU-written textures and zeroed then in shadow storage, and perf lines for slow uploads and image creations.
+// From fe3h-pc-recomp runtime/vk_texture.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; shader image stores are recorded as GPU writes by slot id; textures in a shadowed virtual pool are mirrored from its shadow storage; partial uploads of large block-linear textures (upload_part), images made at registration for large CPU-written textures and zeroed then in shadow storage, perf lines for slow uploads and image creations, and the per-frame ASTC decode budget (MP4_ASTC_BUDGET) with levels decoded in later frames.
 // From totk-pc-recomp runtime/vk_texture.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only; sampler slots span several pools (FE3H).
 // Vulkan textures of the graphics layer: a VkImage cache keyed by storage
 // GPU address plus descriptor, uploads through staging buffers with block-linear deswizzle and ASTC decode (vk_astc.c),
@@ -63,6 +63,7 @@ typedef struct Tex {
     uint8_t zeroed;               // the image was zeroed at its registration (zero_image): a first partial upload
                                   // copies only the written blocks
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
+    uint8_t astc_pending;         // in astc_pend: levels below pub.min_lod still to decode (MP4_ASTC_BUDGET)
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -265,7 +266,9 @@ static void init_image(Tex *e, VkCommandBuffer cb) {
                                 .image = e->pub.image, .subresourceRange = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
     vkCmdPipelineBarrier2(cb, &di);
+    vk_upload_note(VK_UPN_INIT, 1);
     if (e->f.depth || e->f.stencil) {
+        vk_upload_note(VK_UPN_CLEAR, 1);
         VkClearDepthStencilValue zero = {0.0f, 0};
         VkImageSubresourceRange rg = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearDepthStencilImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
@@ -276,6 +279,7 @@ static void init_image(Tex *e, VkCommandBuffer cb) {
         // there; mirrored images are uploaded from their storage on first use.
         VkClearColorValue zero = {0};
         VkImageSubresourceRange rg = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        vk_upload_note(VK_UPN_CLEAR, 1);
         vkCmdClearColorImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
         barrier(cb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     }
@@ -474,7 +478,9 @@ static void rel_unlink(Tex *e) {
     e->rel_prev = e->rel_next = NULL;
 }
 
+static void astc_pend_remove(Tex *e);
 static void destroy_tex(Tex *e) {
+    if (e->astc_pending) astc_pend_remove(e);
     own_remove(e);
     tex_gen_bump(e->key.addr);
     nvn_hm_del(&by_key, &e->key);
@@ -605,8 +611,46 @@ static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar,
 // Where an upload's time went (MP4_TRACE=perf, upload).
 typedef struct { uint32_t levels, layers; VkDeviceSize total; uint64_t stage_ns, ds_ns, cv_ns, blocks, sent; int part; } UpStat;
 
-// Copies the whole storage into the image (every level and layer the image has). 0 when the texture has no CPU layout.
-static int upload_full(Tex *e, UpStat *st) {
+// MP4_ASTC_DUMP=<dir> (off by default): every ASTC upload the compute decoder takes is written to
+// <dir>/f<frame>_<n>.astc as its raw blocks and regions, for --bench-astc (astc_probe.c bench_astc), which times the
+// decoder on them away from the game. Game data: the folder belongs under build/. MP4_ASTC_DUMP_MIB (default 1024)
+// caps the bytes written. Layout (little endian): "MP4ASTC1", u32 frame, bw, bh, srgb, width, height, levels, layers,
+// nregions; nregions x {u64 src; u32 w, h, slices, level, layer}; u64 bytes; the blocks.
+static void astc_dump(const Tex *e, const VkAstcRegion *ar, uint32_t n, const uint8_t *stg, uint64_t total) {
+    static const char *dir;
+    static int init;
+    static uint64_t written, cap;
+    static volatile long seq;
+    if (!init) {
+        dir = cfg_get("MP4_ASTC_DUMP");
+        if (dir && !*dir) dir = NULL;
+        const char *m = cfg_get("MP4_ASTC_DUMP_MIB");
+        cap = (m && *m ? strtoull(m, NULL, 0) : 1024) << 20;
+        if (dir) CreateDirectoryA(dir, NULL), rt_log("vk: ASTC uploads are dumped to %s (MP4_ASTC_DUMP, at most %llu MiB)", dir, (unsigned long long)(cap >> 20));
+        init = 1;
+    }
+    if (!dir || written + total > cap) return;
+    written += total;
+    uint32_t frame = (uint32_t)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\f%06u_%05ld.astc", dir, frame, InterlockedIncrement(&seq));
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const nvn_texdesc *d = &e->t.d;
+    uint32_t h[9] = {frame, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, d->width, d->height, e->pub.levels, e->pub.layers, n};
+    fwrite("MP4ASTC1", 1, 8, f), fwrite(h, 4, 9, f);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t src = ar[i].src;
+        uint32_t r[5] = {ar[i].w, ar[i].h, ar[i].slices, ar[i].level, ar[i].layer};
+        fwrite(&src, 8, 1, f), fwrite(r, 4, 5, f);
+    }
+    fwrite(&total, 8, 1, f), fwrite(stg, 1, (size_t)total, f);
+    fclose(f);
+}
+
+// Copies the storage into the image: levels lv0 .. lv1 - 1 (clamped to the image's) of every layer; upload_full is
+// all of them. 0 when the texture has no CPU layout.
+static int upload_levels(Tex *e, UpStat *st, uint32_t lv0, uint32_t lv1) {
     static volatile long n_bad, n_undecoded;
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
@@ -614,13 +658,16 @@ static int upload_full(Tex *e, UpStat *st) {
     if (!bpb || !t->mem) return 0;
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
+    if (lv1 > levels) lv1 = levels;
+    if (lv0 >= lv1) return 0;
+    int whole = lv0 == 0 && lv1 == levels;
     int astc = e->f.astc_bw != 0, rgb = e->f.expand_rgb;
     int agpu = astc && vk_astc_gpu(), acheck = agpu && vk_astc_mode() == VK_ASTC_CHECK;   // raw blocks to the GPU
-    uint32_t n = levels * layers, k = 0;
+    uint32_t n = (lv1 - lv0) * layers, k = 0;
     VkBufferImageCopy *rg = calloc(n, sizeof *rg);
     VkAstcRegion *ar = agpu ? calloc(n, sizeof *ar) : NULL;
     VkDeviceSize total = 0, decoded = 0;
-    for (uint32_t lv = 0; lv < levels; lv++)
+    for (uint32_t lv = lv0; lv < lv1; lv++)
         for (uint32_t ly = 0; ly < layers; ly++) {
             uint32_t w = mip(d->width, lv), h = one_d ? 1 : mip(d->height, lv), sl = is3d ? mip(d->depth, lv) : 1;
             uint64_t texels = (uint64_t)w * h * sl, raw = (uint64_t)(w + bw - 1) / bw * bpb * ((h + bh - 1) / bh) * sl;
@@ -637,7 +684,7 @@ static int upload_full(Tex *e, UpStat *st) {
     uint8_t *stg = vk_staging(total, &sb, NULL), *rmap = acheck ? vk_staging(decoded, &rbuf, &ralloc) : NULL;
     uint64_t stage_ns = kern_now_ns() - s0, ds_ns = 0, cv_ns = 0;
     k = 0;
-    for (uint32_t lv = 0; lv < levels; lv++)
+    for (uint32_t lv = lv0; lv < lv1; lv++)
         for (uint32_t ly = 0; ly < layers; ly++, k++) {
             uint32_t w = rg[k].imageExtent.width, h = rg[k].imageExtent.height, sl = rg[k].imageExtent.depth;
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
@@ -670,6 +717,7 @@ static int upload_full(Tex *e, UpStat *st) {
             cv_ns += kern_now_ns() - d1;
             free(tmp);
         }
+    if (agpu && whole) astc_dump(e, ar, n, stg, total);
     uint8_t *raw_copy = acheck ? malloc(total) : NULL;
     if (raw_copy) memcpy(raw_copy, stg, total);
     barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -686,6 +734,8 @@ static int upload_full(Tex *e, UpStat *st) {
         vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, rg);
     }
     barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    if (agpu) vk_upload_note(VK_UPN_ASTC, 1), vk_upload_note(VK_UPN_ASTC_TEXELS, decoded / 4);
+    else vk_upload_note(VK_UPN_FULL, 1), vk_upload_note(VK_UPN_FULL_BYTES, total);
     vk_upload_end();
     if (acheck) {   // waits for the GPU
         vk_upload_flush(1);
@@ -698,8 +748,106 @@ static int upload_full(Tex *e, UpStat *st) {
     free(raw_copy);
     free(ar);
     free(rg);
-    *st = (UpStat){.levels = levels, .layers = layers, .total = total, .stage_ns = stage_ns, .ds_ns = ds_ns, .cv_ns = cv_ns};
+    *st = (UpStat){.levels = lv1 - lv0, .layers = layers, .total = total, .stage_ns = stage_ns, .ds_ns = ds_ns, .cv_ns = cv_ns};
     return 1;
+}
+static int upload_full(Tex *e, UpStat *st) { return upload_levels(e, st, 0, UINT32_MAX); }
+
+// MP4_ASTC_BUDGET (M texels per frame, default 8; 0 off): ASTC decoded by the compute decoder per frame. A texture's
+// first upload (or its upload again after a write) that does not fit decodes only its small levels now, from the
+// smallest level whose tail fits (at least the levels of up to 128 K texels per layer), and the image is sampled with a
+// minimum LOD at that level (pub.min_lod, VK_EXT_image_view_min_lod) until astc_pend_step has decoded the larger
+// levels, one level at a time in later frames. About 8 s into the first area the game draws 81 newly streamed ASTC
+// textures (80 M texels) in one frame; decoded at once that took 65-120 ms of GPU time on a GPU the game keeps at low
+// clocks (docs/plan.md, "The 179-texture frame"). Only mipmapped, non-3D textures, and not with MP4_ASTC=check.
+#define ASTC_FLOOR (128u << 10)
+static Tex **astc_pend;
+static int nastc_pend, castc_pend;
+static uint64_t astc_used, astc_frame;   // decoded texels in frame astc_frame
+static uint64_t n_deferred, n_pend_levels;   // MP4_TRACE=perf counters since the last perf line
+
+static uint64_t astc_budget(void) {
+    static int64_t b = -1;
+    if (b < 0) {
+        const char *v = cfg_get("MP4_ASTC_BUDGET");
+        b = (int64_t)((v && *v ? strtod(v, NULL) : 8.0) * 1e6);
+        if (b < 0) b = 0;
+        if (b && !vk_ctx()->has_min_lod) {
+            rt_log("vk: MP4_ASTC_BUDGET: the device has no VK_EXT_image_view_min_lod: ASTC textures decode whole at first use");
+            b = 0;
+        }
+    }
+    return (uint64_t)b;
+}
+
+static uint64_t astc_used_now(void) {
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f != astc_frame) astc_frame = f, astc_used = 0;
+    return astc_used;
+}
+
+static uint64_t level_texels(const Tex *e, uint32_t lv) {
+    const nvn_texdesc *d = &e->t.d;
+    return (uint64_t)mip(d->width, lv) * mip(d->height, lv) * e->pub.layers;
+}
+
+static void set_min_lod(Tex *e, uint32_t lv) {
+    if (e->pub.min_lod == lv) return;
+    e->pub.min_lod = (uint8_t)lv;
+    tex_gen_bump(e->pub.addr);   // slots and descriptor memos resolve again and get a view with the new clamp
+}
+
+static void astc_pend_remove(Tex *e) {
+    for (int i = 0; i < nastc_pend; i++)
+        if (astc_pend[i] == e) {
+            memmove(astc_pend + i, astc_pend + i + 1, (size_t)(nastc_pend - i - 1) * sizeof *astc_pend);
+            nastc_pend--;
+            break;
+        }
+    e->astc_pending = 0;
+}
+
+// The levels of a budgeted upload: 0 = all of them now; else the first level decoded now (pub.min_lod).
+static uint32_t astc_first_level(const Tex *e) {
+    uint64_t b = astc_budget();
+    if (!b || !e->f.astc_bw || !vk_astc_gpu() || vk_astc_mode() == VK_ASTC_CHECK || e->pub.levels < 2 ||
+        e->pub.type == VK_IMAGE_TYPE_3D || nvn_tex_is_linear(&e->t.d))
+        return 0;
+    uint64_t used = astc_used_now(), tail = 0;
+    for (uint32_t lv = 0; lv < e->pub.levels; lv++) tail += level_texels(e, lv);
+    if (used + tail <= b) return 0;
+    uint64_t room = b > used ? b - used : 0, floor = (uint64_t)ASTC_FLOOR * e->pub.layers;
+    if (room < floor) room = floor;
+    uint32_t k = 0;
+    while (k + 1 < e->pub.levels && tail > room) tail -= level_texels(e, k++);
+    return k;
+}
+
+// Once per frame (vk_texture_new_submit, before the submission's recording is flushed with its uploads): the next
+// level of the pending textures, oldest first, while the frame's budget lasts (at least one level per frame).
+static void astc_pend_step(void) {
+    static uint64_t at = UINT64_MAX;
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!nastc_pend || f == at) return;
+    at = f;
+    uint64_t b = astc_budget();
+    int done = 0;
+    while (nastc_pend) {
+        Tex *e = astc_pend[0];
+        if (!e->pub.min_lod) { astc_pend_remove(e); continue; }
+        uint32_t lv = e->pub.min_lod - 1u;
+        uint64_t t = level_texels(e, lv);
+        if (done && astc_used_now() + t > b) break;
+        UpStat st;
+        if (!upload_levels(e, &st, lv, lv + 1)) {   // no CPU layout: stop clamping
+            set_min_lod(e, 0);
+            astc_pend_remove(e);
+            continue;
+        }
+        astc_used += t, done++, n_pend_levels++;
+        set_min_lod(e, lv);
+        if (!lv) astc_pend_remove(e);
+    }
 }
 
 // Partial upload (MP4_TEX_PARTIAL, on by default) of one-level, one-layer block-linear textures of at least 16 MiB
@@ -769,6 +917,7 @@ static int zero_image(Tex *e, VkCommandBuffer cb) {
     barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     vkCmdCopyBufferToImage(cb, zb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, k, rz);
     barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    vk_upload_note(VK_UPN_ZERO, 1);
     free(rz);
     return 1;
 }
@@ -869,6 +1018,7 @@ static int upload_part(Tex *e, UpStat *st) {
         if (kz) vkCmdCopyBufferToImage(cb, zb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)kz, rz);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     }
+    vk_upload_note(VK_UPN_PART, 1), vk_upload_note(VK_UPN_PART_BYTES, bytes);
     vk_upload_end();
     free(rg);
     free(rz);
@@ -881,8 +1031,29 @@ static int upload_part(Tex *e, UpStat *st) {
 static void upload(Tex *e) {
     uint64_t p0 = perf_begin(), u0 = kern_now_ns();
     UpStat st = {0};
-    if (!(e->up_part && upload_part(e, &st)) && !upload_full(e, &st)) return;
+    uint32_t k = astc_first_level(e);   // 0 for all but ASTC, which upload_part does not take
+    if (!(e->up_part && upload_part(e, &st)) && !upload_levels(e, &st, k, UINT32_MAX)) return;
     e->up_part = 0;
+    if (e->f.astc_bw) {
+        uint64_t t = 0;
+        for (uint32_t lv = k; lv < e->pub.levels; lv++) t += level_texels(e, lv);
+        astc_used_now(), astc_used += t;
+        if (k) {
+            n_deferred++;
+            if (!e->astc_pending) {
+                if (nastc_pend == castc_pend) {
+                    castc_pend = castc_pend ? castc_pend * 2 : 256;
+                    astc_pend = realloc(astc_pend, (size_t)castc_pend * sizeof *astc_pend);
+                    if (!astc_pend) rt_fatal("vk: out of memory (pending ASTC levels)");
+                }
+                astc_pend[nastc_pend++] = e;
+                e->astc_pending = 1;
+            }
+        } else if (e->astc_pending) {
+            astc_pend_remove(e);
+        }
+        set_min_lod(e, k);
+    }
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
     uint64_t dt = kern_now_ns() - u0;
@@ -1370,6 +1541,7 @@ void vk_texture_new_submit(void) {
     lock();
     if (!++submit_epoch) submit_epoch = 1;
     sweep_pressure();
+    astc_pend_step();
     static uint64_t log_at;
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) / 60;
     if ((rt_trace & RT_TRACE_PERF) && f != log_at && tex_alias > 0) {
@@ -1390,6 +1562,11 @@ void vk_texture_new_submit(void) {
         n_checks = 0;
         rt_log("perf: frame %llu: released textures kept %d, dropped under VRAM pressure %llu", (unsigned long long)f * 60,
                nreleased, (unsigned long long)n_pressure_drops);
+        if (n_deferred || n_pend_levels || nastc_pend)
+            rt_log("perf: frame %llu: ASTC budget: %llu uploads deferred their large levels, %llu levels decoded later, %d "
+                   "textures pending", (unsigned long long)f * 60, (unsigned long long)n_deferred,
+                   (unsigned long long)n_pend_levels, nastc_pend);
+        n_deferred = n_pend_levels = 0;
         n_pressure_drops = 0;
     }
     unlock();

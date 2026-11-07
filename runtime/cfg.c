@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/cfg.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the prefix length follows the prefix string; adds MP4_BREAK_AT, MP4_TEX_PARTIAL, MP4_IMPORT_ARENA, MP4_MIRROR_LAZY and MP4_TEX_EARLY.
+// From fe3h-pc-recomp runtime/cfg.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the prefix length follows the prefix string; adds MP4_BREAK_AT, MP4_TEX_PARTIAL, MP4_IMPORT_ARENA, MP4_MIRROR_LAZY, MP4_TEX_EARLY, MP4_ASTC_DUMP(_MIB), MP4_ASTC_BENCH_RUNS and MP4_ASTC_BUDGET.
 // From totk-pc-recomp runtime/cfg.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; knows FE3H_THREAD_DUMP.
 // mp4.ini: file-backed defaults for the MP4_* environment variables (docs/controls.md, mp4.ini.example).
 // Format: "key = value" lines, '#' or ';' at the start of a line begins a comment, [sections] only group. A key is a
@@ -32,7 +32,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO",
+    "AB", "APP_POOL", "ASPECT", "ASPECT_PATCH", "ASSUME_FOCUS", "ASTC", "ASTC_BC", "ASTC_BENCH_RUNS", "ASTC_BUDGET", "ASTC_DUMP", "ASTC_DUMP_MIB", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO",
     "CRUMBS", "SKIP_OPS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",

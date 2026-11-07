@@ -39,7 +39,8 @@ typedef struct VkCtx {
     int has_custom_border_color, has_eds, has_eds2, has_eds3, has_vertex_input_dynamic_state,
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker, has_nv_checkpoints,
-        has_astc_ldr;                       // textureCompressionASTC_LDR (enabled when reported)
+        has_astc_ldr,                       // textureCompressionASTC_LDR (enabled when reported)
+        has_min_lod;                        // VK_EXT_image_view_min_lod with its minLod feature (MP4_ASTC_BUDGET)
     // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass that
     // an earlier draw of the pass wrote. MP4_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
     // old behaviour); VK_FEEDBACK_LAYOUT with VK_EXT_attachment_feedback_loop_layout and dynamicRenderingLocalRead
@@ -244,6 +245,11 @@ VkCommandBuffer vk_upload_begin(void);
 void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
 uint64_t vk_upload_flush(int wait);
+// MP4_TRACE=perf: what the open batch holds (called between vk_upload_begin and vk_upload_end), for the perf line of a
+// batch over 5 ms of GPU time. Counts of textures and images, bytes of plain copies, texels of ASTC decodes.
+enum { VK_UPN_FULL, VK_UPN_FULL_BYTES, VK_UPN_PART, VK_UPN_PART_BYTES, VK_UPN_ASTC, VK_UPN_ASTC_TEXELS, VK_UPN_INIT,
+       VK_UPN_CLEAR, VK_UPN_ZERO, VK_UPN_N };
+void vk_upload_note(int kind, uint64_t n);
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
 void vk_defer_image(VkImage img, VmaAllocation alloc);   // alloc NULL: vkDestroyImage only
 void vk_defer_view(VkImageView view);
@@ -301,6 +307,7 @@ typedef struct {
     uint8_t fb_usage;              // created with ATTACHMENT_FEEDBACK_LOOP usage (VK_FEEDBACK_LAYOUT, attachable images)
     uint8_t fb_learned;            // a draw sampled it while it was a written attachment of the open pass: its passes
                                    // attach it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (vk_exec.c vk_exec_pass_begin)
+    uint8_t min_lod;               // levels below it are not decoded yet (vk_texture.c MP4_ASTC_BUDGET): sampled views clamp
 } VkTexImage;
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats
 // A texture slot; a slot whose texture was finalized follows the live texture at the same storage (hle_nvn.c).

@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the viewport orientation follows the window origin mode; storage images a shader stores into are recorded as GPU writes; texture type answers carry the integer class of the format; mirror uses pass the bytes they bind (VK_MEM_USE).
+// From fe3h-pc-recomp runtime/vk_exec_draw.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the viewport orientation follows the window origin mode; storage images a shader stores into are recorded as GPU writes; texture type answers carry the integer class of the format; mirror uses pass the bytes they bind (VK_MEM_USE); sampled views clamp to the ASTC levels decoded so far (VkTexImage.min_lod).
 // From totk-pc-recomp runtime/vk_exec_draw.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh); renamed to fe3h; separable programs: BindProgram with a subset of stages (FE3H); bound handles become pool slots (FE3H uses several descriptor pools).
 // Draws, binds and dispatches of the Vulkan op-stream replay: the strong
 // vk_exec_op_draw behind vk_exec.c's weak hook. The bind ops fill the VkExec slots; a draw opens the pass, resolves the
@@ -69,8 +69,9 @@ typedef struct {
     VkFormat format;
     VkImageViewType type;
     uint32_t aspect, level0, levels, layer0, layers, swz;
+    uint32_t min_lod, zero;   // VkTexImage.min_lod of a sampled view; zero: keeps the key free of padding
 } ViewKey;
-_Static_assert(sizeof(ViewKey) == 40, "ViewKey is hashed as bytes: no padding");
+_Static_assert(sizeof(ViewKey) == 48, "ViewKey is hashed as bytes: no padding");
 typedef struct { uint64_t addr, size; } Range;
 typedef struct {
     Chunk *chunks;
@@ -530,7 +531,10 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
             }
     }
     uint32_t swz = (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24;
-    ViewKey k = {img->image, img->format, vt, aspect, l0, nl, y0, ny, swz};
+    // Levels of an ASTC texture not decoded yet (vk_texture.c MP4_ASTC_BUDGET) are clamped away: minLod counts image
+    // levels, so a view whose base is at or past it needs none.
+    uint32_t mlod = !storage && img->min_lod > l0 ? img->min_lod : 0;
+    ViewKey k = {img->image, img->format, vt, aspect, l0, nl, y0, ny, swz, mlod, 0};
     if (!view_of.klen) nvn_hm_init(&view_of, sizeof(ViewKey)), nvn_hm_init(&views_by_image, sizeof(VkImage));
     VkImageView found = (VkImageView)nvn_hm_get(&view_of, &k);
     if (found) return found;
@@ -541,6 +545,9 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                       .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
     if (img->block_views) ci.pNext = &use;   // the image's COLOR_ATTACHMENT usage is its block views' (vk_texture.c)
+    VkImageViewMinLodCreateInfoEXT ml = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT,
+                                         .pNext = (void *)ci.pNext, .minLod = (float)mlod};
+    if (mlod) ci.pNext = &ml;
     VkImageView view;
     if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
     ViewNode *n = malloc(sizeof *n);

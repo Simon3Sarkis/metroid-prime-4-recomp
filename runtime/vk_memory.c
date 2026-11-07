@@ -1753,6 +1753,7 @@ typedef struct {
     int nstg, cap;
     int qslot;                         // MP4_TRACE=perf: 1 + its timestamp pair in up_qp; 0 none
     uint64_t submit_qpc, staged, frame;
+    uint64_t note[VK_UPN_N];           // vk_upload_note
 } Batch;
 // MP4_TRACE=perf: GPU timestamps at the start and end of each upload batch; retire logs batches whose GPU work took
 // over 5 ms, with the staging bytes they carried and how long after their submission the fence was seen.
@@ -1806,10 +1807,17 @@ static void retire(VkCtx *c, int wait_all) {
             if (vkGetQueryPoolResults(c->device, up_qp, (uint32_t)(b->qslot - 1) * 2, 2, sizeof ts, ts, 8,
                                       VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
                 double gpu = (double)(ts[1] - ts[0]) * c->props.limits.timestampPeriod / 1e6;
+                const uint64_t *u = b->note;
                 if (gpu > 5.0)
-                    rt_log("perf: frame %llu: upload batch %llu: GPU %.1f ms, %.1f MiB staged, fence seen %.1f ms after the submit",
+                    rt_log("perf: frame %llu: upload batch %llu: GPU %.1f ms, %.1f MiB staged, fence seen %.1f ms after the submit; "
+                           "holds %llu whole uploads (%.1f MiB copied), %llu partial (%.1f MiB), %llu ASTC (%.2f M texels), "
+                           "%llu new images (%llu cleared), %llu zeroed",
                            (unsigned long long)b->frame, (unsigned long long)b->seq, gpu, b->staged / 1048576.0,
-                           qpc_ms(qpc() - b->submit_qpc));
+                           qpc_ms(qpc() - b->submit_qpc), (unsigned long long)u[VK_UPN_FULL], u[VK_UPN_FULL_BYTES] / 1048576.0,
+                           (unsigned long long)u[VK_UPN_PART], u[VK_UPN_PART_BYTES] / 1048576.0,
+                           (unsigned long long)u[VK_UPN_ASTC], u[VK_UPN_ASTC_TEXELS] / 1e6,
+                           (unsigned long long)u[VK_UPN_INIT], (unsigned long long)u[VK_UPN_CLEAR],
+                           (unsigned long long)u[VK_UPN_ZERO]);
             }
         }
         free_staging(c, b);
@@ -1889,6 +1897,10 @@ VkCommandBuffer vk_upload_begin(void) {
 }
 
 void vk_upload_end(void) { LeaveCriticalSection(&cmd_lock); }
+
+void vk_upload_note(int kind, uint64_t n) {   // cmd_lock held (between vk_upload_begin and vk_upload_end)
+    if (open_active && kind >= 0 && kind < VK_UPN_N) open_b.note[kind] += n;
+}
 
 // Staging memory comes from a pool of its own that keeps STG_MIN_BLOCKS blocks from its first use (at boot). In the
 // default pools VMA creates a block under the lock of its memory type (VmaBlockVector::Allocate), so a block made by

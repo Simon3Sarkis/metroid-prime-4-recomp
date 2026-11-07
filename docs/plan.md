@@ -335,6 +335,33 @@ the null decoder). No host AAC decoder needed.
   the loading screen at about 220-280 ms (the light volumes' residency and zeroing). 1% low in the first minute 33 to
   46 fps, frames over 100 ms 6 to 4. Left: about 5 s into play the game streams 179 textures in one frame (an upload
   batch of 69 MiB and 120 ms of GPU time, a 120-180 ms frame); the zero fill under the loading screen.
+- The 179-texture frame (2026-11-07). About 8 s into scripted first-area play (frame ~2470) one upload batch takes
+  65-120 ms of GPU time and the frame waits on it. The batch perf line now says what a batch holds (`vk_upload_note`):
+  that one is 81-83 ASTC textures (80 M texels) and 12 plain uploads (13 MiB); the save-load frame's batch is the same
+  mix (46 ASTC, 65 M texels). The RTX 4070 samples no ASTC, so the compute decoder (`vk_astc.c`) does it all.
+  - `MP4_ASTC_DUMP=<dir>` writes the blocks and regions of every upload the decoder takes (under `build/`, game data),
+    and `--bench-astc` times the decoder on them away from the game and checks every texel against `astc_decode_ldr`.
+    The burst's 111 textures (105 M texels): 16-19 ms of dispatches and 29-40 ms of batch wall time on a busy GPU,
+    129 us per M texel for 5x5; in the game the same work ran at 660 us per M texel. After two idle seconds the
+    first run took 182-228 ms of dispatches: the GPU's clocks. The game keeps the GPU at about 3 ms of work per frame,
+    so the burst meets a GPU at low clocks. A scratch buffer kept from call to call (against fresh memory per texture)
+    changed nothing and was not kept.
+  - When the game registers those textures (`vk_texture_register`): 286-767 frames before their first draw, and the
+    data is mostly written after the registration. But the game registers far more than it draws: 1,625 ASTC textures
+    (1,012 M texels at level 0) by frame 2400, of which 200 were drawn in the run; in the 300 frames before the burst
+    it wrote 974 registered ASTC textures (785 M texels) and drew 50. Decoding ahead from registration or from recent
+    writes would cost gigabytes of RGBA8 for textures nothing draws.
+  So the decode stays at the first draw, and a frame decodes at most a budget of it: `MP4_ASTC_BUDGET` (M texels per
+  frame, default 8; 0 restores whole decodes). A mipmapped ASTC texture that does not fit decodes its small levels
+  (at least those of up to 128 K texels per layer) and is sampled through views with a minimum LOD
+  (`VK_EXT_image_view_min_lod`; `VkTexImage.min_lod`, part of the view key in `vk_exec_draw.c` `get_view`); its larger
+  levels follow one per frame, oldest texture first (`vk_texture.c` `astc_pend_step`, run before each frame's first
+  submission is flushed, so a level is in the queue before the draws that sample it). Without the extension nothing
+  changes. Result in the same play: the burst's largest batch 62 ms to 9 ms of GPU time, spread over about ten frames
+  of 5-9 ms batches; slow frames in frames 2400-2700 one (68 ms) to none. The burst's textures look soft for those
+  ten frames and are sharp again by frame 2504 (screenshots of both runs at the burst and after it). The save-load
+  frame (frame ~2216) still waits 130 ms on a fence whose batch took 7 ms of GPU time: that is the load's residency
+  cost above, not the decode. The validation layer reports nothing new (the two VUIDs it lists predate this).
 
 ## Shared core
 

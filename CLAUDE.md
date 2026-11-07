@@ -82,8 +82,10 @@ playing new areas. The pipelines play built ship the same way (`build/pipeline-l
 --make-pipeline-list` from `pipeline-keys.bin`, built by `--prepare-shaders`; "Pipeline list" there), which took a fresh
 install's skipped draws from 2,247 to 75. The save-load hitch went from 1.5 s to 0.5 s (`docs/plan.md`, "The save-load
 hitch": partial light-volume uploads, one host-pointer query, write-watch queries that resume), then to about 0.2 s
-(shared heap imports, light volume images made and zeroed at registration, during the load). Next in that play: a
-frame about 5 s in that uploads 179 textures (120 ms of GPU time).
+(shared heap imports, light volume images made and zeroed at registration, during the load). The ASTC burst about 8 s
+in (80 M texels decoded in one frame on a GPU the game keeps at low clocks, 65-120 ms) is now spread by a per-frame
+decode budget, `MP4_ASTC_BUDGET`, with views clamped by `VK_EXT_image_view_min_lod` until the large levels are in
+(`docs/plan.md`, "The 179-texture frame"); `MP4_ASTC_DUMP` with `--bench-astc` times the decoder on real uploads offline.
 
 ## Open questions
 

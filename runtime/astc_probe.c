@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/astc_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/astc_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; adds --bench-astc (bench_astc).
 // From totk-pc-recomp runtime/astc_probe.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // --probe-astc: the compute ASTC decoder (vk_astc.c, shaders/astc_decode.comp) against astc_decode_ldr, bit for bit,
 // for every block footprint, linear and sRGB. Synthetic blocks only (no game files): valid void extents, invalid and
@@ -14,6 +14,7 @@
 #include <string.h>
 #include <windows.h>
 
+#include "cfg.h"
 #include "host.h"
 #include "tex.h"
 #include "vk.h"
@@ -399,4 +400,207 @@ int probe_astc(void) {
            (unsigned long long)g_bucket[4], (unsigned long long)g_bucket[5], (unsigned long long)g_bucket[6],
            (unsigned long long)g_void, (unsigned long long)g_err);
     return 0;
+}
+
+// --bench-astc: the compute decoder timed on real uploads, away from the game. Reads the files MP4_ASTC_DUMP wrote
+// (vk_texture.c astc_dump) from that folder, groups them by the frame that uploaded them, and records each group into
+// one upload batch, as the game did: GPU time of the dispatches per footprint (MP4_ASTC_TIME timestamps) and the batch
+// wall time, best of MP4_ASTC_BENCH_RUNS (default 5). A last run reads the texels back and holds them to
+// astc_decode_ldr bit for bit. 3D textures (slices > 1) are skipped.
+typedef struct { uint64_t src; uint32_t w, h, slices, level, layer; } BenchReg;
+typedef struct {
+    uint32_t frame, bw, bh, srgb, width, height, levels, layers, n;
+    BenchReg *r;
+    uint8_t *blk;
+    uint64_t bytes;
+} BenchFile;
+
+static int bench_load(const char *path, BenchFile *o) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char magic[8];
+    uint32_t h[9];
+    int ok = fread(magic, 1, 8, f) == 8 && !memcmp(magic, "MP4ASTC1", 8) && fread(h, 4, 9, f) == 9;
+    if (ok) {
+        *o = (BenchFile){h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]};
+        o->r = calloc(o->n ? o->n : 1, sizeof *o->r);
+        for (uint32_t i = 0; ok && i < o->n; i++) {
+            uint32_t r[5];
+            ok = fread(&o->r[i].src, 8, 1, f) == 1 && fread(r, 4, 5, f) == 5;
+            o->r[i].w = r[0], o->r[i].h = r[1], o->r[i].slices = r[2], o->r[i].level = r[3], o->r[i].layer = r[4];
+            if (r[2] != 1) ok = 0;
+        }
+        ok = ok && fread(&o->bytes, 8, 1, f) == 1 && (o->blk = malloc(o->bytes ? o->bytes : 1)) &&
+             fread(o->blk, 1, o->bytes, f) == o->bytes;
+        if (!ok) free(o->r), free(o->blk);
+    }
+    fclose(f);
+    return ok;
+}
+
+static int bench_cmp(const void *a, const void *b) {
+    const BenchFile *x = a, *y = b;
+    return x->frame < y->frame ? -1 : x->frame > y->frame;
+}
+
+// One frame's files decoded in one batch; check: read back and compare (returns the mismatching textures).
+static int bench_group(VkCtx *c, BenchFile *fs, int nf, int check, double *wall) {
+    Img *im = calloc((size_t)nf, sizeof *im);
+    VkBuffer *rbuf = calloc((size_t)nf, sizeof *rbuf);
+    VmaAllocation *ralloc = calloc((size_t)nf, sizeof *ralloc);
+    uint8_t **rmap = calloc((size_t)nf, sizeof *rmap);
+    VkCommandBuffer cb = vk_upload_begin();
+    for (int i = 0; i < nf; i++) {
+        BenchFile *f = &fs[i];
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                .format = f->srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+                                .extent = {f->width, f->height, 1}, .mipLevels = f->levels, .arrayLayers = f->layers,
+                                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(c->vma, &ci, &ai, &im[i].img, &im[i].alloc, NULL) != VK_SUCCESS) rt_fatal("bench-astc: image");
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                                    .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .image = im[i].img,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &di);
+        VkBuffer sb;
+        memcpy(vk_staging(f->bytes, &sb, NULL), f->blk, f->bytes);
+        VkAstcRegion *ar = calloc(f->n, sizeof *ar);
+        uint64_t out = 0;
+        for (uint32_t k = 0; k < f->n; k++) {
+            ar[k] = (VkAstcRegion){.src = f->r[k].src, .w = f->r[k].w, .h = f->r[k].h, .slices = 1,
+                                   .level = f->r[k].level, .layer = f->r[k].layer};
+            out += (uint64_t)f->r[k].w * f->r[k].h * 4;
+        }
+        if (check) rmap[i] = vk_staging(out, &rbuf[i], &ralloc[i]);
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        if (!vk_astc_record(cb, sb, f->bytes, ar, (int)f->n, f->bw, f->bh, (int)f->srgb, 0, im[i].img,
+                            VK_IMAGE_ASPECT_COLOR_BIT, check ? rbuf[i] : VK_NULL_HANDLE))
+            rt_fatal("bench-astc: vk_astc_record refused %ux%u", f->bw, f->bh);
+        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        free(ar);
+    }
+    vk_upload_end();
+    double a = now_ms();
+    vk_upload_flush(1);
+    *wall = now_ms() - a;
+    int bad = 0;
+    for (int i = 0; i < nf; i++) {
+        if (check) {
+            BenchFile *f = &fs[i];
+            vmaInvalidateAllocation(c->vma, ralloc[i], 0, VK_WHOLE_SIZE);
+            uint64_t off = 0;
+            int diff = 0;
+            for (uint32_t k = 0; k < f->n; k++) {
+                size_t t = (size_t)f->r[k].w * f->r[k].h * 4;
+                uint8_t *want = malloc(t);
+                astc_decode_ldr(f->blk + f->r[k].src, f->r[k].w, f->r[k].h, f->bw, f->bh, f->srgb != 0, want);
+                diff |= memcmp(want, rmap[i] + off, t) != 0;
+                off += t;
+                free(want);
+            }
+            if (diff && bad++ < 8)
+                printf("bench-astc: MISMATCH frame %u %ux%u %ux%u texture (%u regions)\n", f->frame, f->bw, f->bh,
+                       f->width, f->height, f->n);
+            vmaDestroyBuffer(c->vma, rbuf[i], ralloc[i]);
+        }
+        vk_defer_image(im[i].img, im[i].alloc);
+    }
+    vk_upload_flush(1);
+    free(im), free(rbuf), free(ralloc), free(rmap);
+    return bad;
+}
+
+int bench_astc(void) {
+    const char *dir = cfg_get("MP4_ASTC_DUMP");
+    if (!dir || !*dir) { printf("bench-astc: set MP4_ASTC_DUMP to the folder of dumped uploads\n"); return 2; }
+    const char *rs = cfg_get("MP4_ASTC_BENCH_RUNS");
+    int runs = rs && *rs ? atoi(rs) : 5;
+    char pat[MAX_PATH];
+    snprintf(pat, sizeof pat, "%s\\*.astc", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) { printf("bench-astc: no .astc files in %s\n", dir); return 2; }
+    BenchFile *fs = NULL;
+    int nf = 0, cap = 0, skipped = 0;
+    do {
+        char p[MAX_PATH];
+        snprintf(p, sizeof p, "%s\\%s", dir, fd.cFileName);
+        if (nf == cap) fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 64) * sizeof *fs);
+        if (bench_load(p, &fs[nf])) nf++;
+        else skipped++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    qsort(fs, (size_t)nf, sizeof *fs, bench_cmp);
+    if (!vk_init()) { printf("bench-astc: FAIL vk_init\n"); return 1; }
+    VkCtx *c = vk_ctx();
+    printf("bench-astc: GPU %s; %d textures in %s (%d skipped: 3D or unreadable), best of %d runs\n",
+           c->props.deviceName, nf, dir, skipped, runs);
+    static const uint8_t fp[][2] = {{4, 4}, {5, 4}, {5, 5}, {6, 5}, {6, 6}, {8, 5}, {8, 6}, {8, 8},
+                                    {10, 5}, {10, 6}, {10, 8}, {10, 10}, {12, 10}, {12, 12}};
+    enum { NFP = sizeof fp / sizeof fp[0] };
+    double best_us[NFP], sum_wall = 0, sum_gpu = 0;
+    uint64_t texels[NFP] = {0};
+    for (int k = 0; k < NFP; k++) best_us[k] = 0;
+    int bad = 0;
+    // Groups: the textures one frame uploaded.
+    for (int g0 = 0; g0 < nf;) {
+        int g1 = g0;
+        uint64_t gt = 0;
+        while (g1 < nf && fs[g1].frame == fs[g0].frame) {
+            for (uint32_t k = 0; k < fs[g1].n; k++) gt += (uint64_t)fs[g1].r[k].w * fs[g1].r[k].h;
+            g1++;
+        }
+        double bw_ = 1e300, bg = 1e300, gus[NFP], first_g = 0, first_w = 0;
+        uint64_t gtex[NFP];
+        if (gt > 10000000) Sleep(2000);   // a large group starts from an idle GPU, as in the game: the first run is cold
+        for (int run = 0; run < runs; run++) {
+            double t0[NFP], wall, tot = 0;
+            uint64_t x0[NFP], cc;
+            vk_astc_time_enable(1);
+            for (int k = 0; k < NFP; k++) vk_astc_time_get(fp[k][0], fp[k][1], &x0[k], &cc, &t0[k]);
+            bench_group(c, fs + g0, g1 - g0, 0, &wall);
+            vk_upload_flush(1);
+            double us[NFP];
+            uint64_t tx[NFP];
+            for (int k = 0; k < NFP; k++) {
+                uint64_t x1;
+                double t1;
+                vk_astc_time_get(fp[k][0], fp[k][1], &x1, &cc, &t1);
+                us[k] = t1 - t0[k], tx[k] = x1 - x0[k], tot += us[k];
+            }
+            vk_astc_time_enable(0);
+            if (!run) first_g = tot, first_w = wall;
+            if (tot < bg) { bg = tot; memcpy(gus, us, sizeof us), memcpy(gtex, tx, sizeof tx); }
+            if (wall < bw_) bw_ = wall;
+        }
+        printf("bench-astc: frame %u: %d textures, %.2f M texels: dispatches %.2f ms GPU, batch wall %.2f ms (first run: "
+               "%.2f, %.2f)\n", fs[g0].frame, g1 - g0, gt / 1e6, bg / 1e3, bw_, first_g / 1e3, first_w);
+        for (int k = 0; k < NFP; k++)
+            if (gtex[k]) {
+                texels[k] += gtex[k];
+                best_us[k] += gus[k];
+            }
+        sum_wall += bw_, sum_gpu += bg;
+        double w;
+        bad += bench_group(c, fs + g0, g1 - g0, 1, &w);
+        g0 = g1;
+    }
+    for (int k = 0; k < NFP; k++)
+        if (texels[k])
+            printf("bench-astc: %ux%u: %.2f M texels, %.2f ms GPU, %.0f us per M texel\n", fp[k][0], fp[k][1],
+                   texels[k] / 1e6, best_us[k] / 1e3, best_us[k] / (texels[k] / 1e6));
+    printf("bench-astc: all: dispatches %.2f ms GPU, batch wall %.2f ms; %s\n", sum_gpu / 1e3, sum_wall,
+           bad ? "MISMATCHES (see above)" : "every texel bit-exact with astc_decode_ldr");
+    for (int i = 0; i < nf; i++) free(fs[i].r), free(fs[i].blk);
+    free(fs);
+    vk_mem_shutdown();
+    vk_shutdown();
+    return bad ? 1 : 0;
 }
