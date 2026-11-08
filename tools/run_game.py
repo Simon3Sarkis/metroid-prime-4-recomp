@@ -1,4 +1,4 @@
-# From fe3h-pc-recomp tools/run_game.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+# From fe3h-pc-recomp tools/run_game.py @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the examples name this game's build and the default script is this game's own.
 # From totk-pc-recomp tools/run_game.py @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 """Run a build of the game headless on a copy of the user's profile with a backed-up save and scripted input.
 
@@ -6,12 +6,12 @@ The user's profile (build/profile) is never written: each run copies it to <exe 
 backup, and deletes the copy afterwards. The log records how many other mp4.exe and ninja.exe processes ran, because
 timings taken next to them are not comparable.
 
-    python tools/run_game.py build/v143 --save <backup> --seconds 15 --tag idle --env MP4_TRACE=perf
-    python tools/run_game.py build/v143 --save <backup> --script <input.txt> --seconds 18 --tag fight --quiet \
+    python tools/run_game.py build/v131072 --save <backup> --seconds 15 --tag idle --env MP4_TRACE=perf
+    python tools/run_game.py build/v131072 --save <backup> --script <input.txt> --seconds 18 --tag fight --quiet \
         --env MP4_TRACE=perf,sched
 
-<backup> is a folder of build/save-backup; --script defaults to tools/input/load_save.txt (title screen to the first
-save slot), and a recording made with MP4_INPUT_RECORD replays the same way.
+<backup> is a folder of build/save-backup; --script defaults to tools/input/load_save.txt (title screen to gameplay
+on the profile's save, about 45 s), and a recording made with MP4_INPUT_RECORD replays the same way.
 """
 import argparse
 import ctypes
