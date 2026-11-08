@@ -1,4 +1,4 @@
-// From fe3h-pc-recomp runtime/gfx_window.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the window class and title name this port; the present blit turns the frame over for the lower-left window origin.
+// From fe3h-pc-recomp runtime/gfx_window.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; the window class and title name this port; the present blit turns the frame over for the lower-left window origin; an sRGB frame keeps its bytes on the UNORM swapchain.
 // From totk-pc-recomp runtime/gfx_window.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // Win32 window, Vulkan surface and swapchain, present blit, 60 Hz vsync thread, focus.
 // Swapchain set-up ported from LAS Recomp, runtime/nvn/vulkan/device.c:254-330 (https://github.com/peiikai/LASRecomp @
@@ -94,6 +94,14 @@ static VkFormat g_th_fmt;
 static VkBuffer g_th_buf;
 static VmaAllocation g_th_alloc;
 static uint8_t *g_th_ptr;
+
+// The sRGB present (present_image): an image of the swapchain's size in the sRGB twin of its UNORM format, which the
+// bilinear blit of an sRGB frame writes and a raw copy then moves into the swapchain image.
+static VkImage g_mid;
+static VmaAllocation g_mid_alloc;
+static VkFormat g_mid_fmt;
+static VkExtent2D g_mid_ext;
+static int g_mid_failed;
 
 static void window_init_locks(void) {
     InitializeCriticalSection(&g_ql);
@@ -680,6 +688,66 @@ static void free_thumbs(void) {
     memset(g_th_pending, 0, sizeof g_th_pending);
 }
 
+static int format_srgb(VkFormat f) {
+    return f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+}
+
+// The sRGB format with the same bytes as a UNORM one, for the formats create_swapchain picks; else UNDEFINED.
+static VkFormat srgb_twin(VkFormat f) {
+    if (f == VK_FORMAT_B8G8R8A8_UNORM) return VK_FORMAT_B8G8R8A8_SRGB;
+    if (f == VK_FORMAT_R8G8B8A8_UNORM) return VK_FORMAT_R8G8B8A8_SRGB;
+    if (f == VK_FORMAT_A8B8G8R8_UNORM_PACK32) return VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    return VK_FORMAT_UNDEFINED;
+}
+
+static VkFormat unorm_twin(VkFormat f) {
+    if (f == VK_FORMAT_B8G8R8A8_SRGB) return VK_FORMAT_B8G8R8A8_UNORM;
+    if (f == VK_FORMAT_R8G8B8A8_SRGB) return VK_FORMAT_R8G8B8A8_UNORM;
+    if (f == VK_FORMAT_A8B8G8R8_SRGB_PACK32) return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    return f;
+}
+
+static void free_mid(void) {
+    VkCtx *c = vk_ctx();
+    if (g_mid && c) vmaDestroyImage(c->vma, g_mid, g_mid_alloc);
+    g_mid = VK_NULL_HANDLE;
+}
+
+// The sRGB present's intermediate at the swapchain's size and format; made again when either changes. A failure
+// (no blit-destination support for the format, no memory) leaves the plain blit for the session, logged once.
+static int ensure_mid(void) {
+    VkFormat f = srgb_twin(g_sc_fmt);
+    if (g_mid_failed || f == VK_FORMAT_UNDEFINED) return 0;
+    if (g_mid && g_mid_fmt == f && g_mid_ext.width == g_sc_ext.width && g_mid_ext.height == g_sc_ext.height) return 1;
+    VkCtx *c = vk_ctx();
+    if (g_mid) {   // a swapchain change: earlier presents may still read it
+        vk_queue_lock();
+        vkDeviceWaitIdle(c->device);
+        vk_queue_unlock();
+        free_mid();
+    }
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(c->phys, f, &fp);
+    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
+                            .extent = {g_sc_ext.width, g_sc_ext.height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if ((fp.optimalTilingFeatures & need) != need ||
+        vmaCreateImage(c->vma, &ci, &ai, &g_mid, &g_mid_alloc, NULL) != VK_SUCCESS) {
+        g_mid = VK_NULL_HANDLE;
+        g_mid_failed = 1;
+        rt_log("gfx: no %ux%u sRGB present image (format %d): sRGB frames are shown decoded", g_sc_ext.width,
+               g_sc_ext.height, (int)f);
+        return 0;
+    }
+    g_mid_fmt = f;
+    g_mid_ext = g_sc_ext;
+    return 1;
+}
+
 // The ring and the blit target in the swapchain's format; allocated on the first present, the image again when the
 // swapchain format changes. A failure turns the thumbnails off for the session.
 static int ensure_thumbs(void) {
@@ -892,10 +960,21 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      VK_ACCESS_2_TRANSFER_WRITE_BIT);
     }
+    // An sRGB frame on a UNORM swapchain (create_swapchain picks UNORM so the bytes the game wrote reach the screen):
+    // the blit decodes an sRGB source to linear and a UNORM destination stores that unencoded, which would show the
+    // frame decoded twice (too dark, crushed blacks). FSR reads it through a UNORM view instead (the game's colour
+    // images are MUTABLE_FORMAT, vk_texture.c), so EASU and RCAS work on the encoded values AMD tunes them for; the
+    // blit writes the sRGB intermediate (decode, filter, encode) and a raw copy moves its bytes into the swapchain.
+    int srgb_frame = format_srgb(fmt) && !format_srgb(g_sc_fmt);
     // FSR (MP4_UPSCALER) when the picture's place on the swapchain is larger than the crop; else the bilinear blit
-    int fsr = general && vk_fsr_record(cb, slot, src, fmt, w, h, rect, dst, to);
+    int fsr = general && vk_fsr_record(cb, slot, src, srgb_frame ? unorm_twin(fmt) : fmt, w, h, rect, dst, to);
     g_scaler = fsr ? 2 : cw != to[2] || ch != to[3];
     if (!fsr) {
+        int mid = srgb_frame && ensure_mid();
+        VkImage bdst = mid ? g_mid : dst;
+        if (mid)   // the previous present's copy out of it is done before this blit writes it (one queue)
+            sync_barrier(cb, g_mid, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         if (general)   // a GENERAL source (vk_texture.c images): earlier submissions' writes become visible to the blit here
             sync_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                          VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -906,11 +985,20 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         VkImageBlit region = {
             .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{cx, y0, 0}, {cx + cw, y1, 1}},
             .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{to[0], to[1], 0}, {to[0] + to[2], to[1] + to[3], 1}}};
-        vkCmdBlitImage(cb, src, general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+        vkCmdBlitImage(cb, src, general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, bdst,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
         if (general)   // later submissions that write the source wait for the blit's read
             sync_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0,
                          VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+        if (mid) {   // same texel size: a raw copy, the encoded bytes unchanged
+            sync_barrier(cb, g_mid, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         VK_ACCESS_2_TRANSFER_READ_BIT);
+            VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffset = {to[0], to[1], 0},
+                              .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffset = {to[0], to[1], 0},
+                              .extent = {(uint32_t)to[2], (uint32_t)to[3], 1}};
+            vkCmdCopyImage(cb, g_mid, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+        }
     }
     // last: the image's layout, and the stage and access of its last write, as each step leaves it
     VkImageLayout last = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1022,6 +1110,7 @@ void gfx_window_release_vk(void) {
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
         menu_vk_release();
         vk_fsr_release();
+        free_mid();
         free_capture();
         free_thumbs();
         for (int i = 0; i < FRAMES; i++) {

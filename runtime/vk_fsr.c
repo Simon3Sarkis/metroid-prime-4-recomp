@@ -1,12 +1,13 @@
-// From fe3h-pc-recomp runtime/vk_fsr.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the final blit turns the frame over for the lower-left window origin.
+// From fe3h-pc-recomp runtime/vk_fsr.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only; the final blit turns the frame over for the lower-left window origin, and the caller picks the source view's format.
 // From totk-pc-recomp runtime/vk_fsr.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // AMD FidelityFX Super Resolution 1 on the present path (gfx_window.c present_image): when the window is larger than
 // the game's output, EASU scales the game's crop rectangle to the swapchain size and RCAS sharpens it, in place of the
 // bilinear vkCmdBlitImage. MP4_UPSCALER=fsr|bilinear picks it, MP4_SHARPNESS (0..100, 0 = no RCAS pass) sets RCAS;
 // both apply at the next frame.
 //
-// Per frame: EASU reads the source through a view of its own format (the same colour conversion the blit does) and
-// writes an RGBA16F image of the picture's size on the swapchain (all of it, or the part between black bars,
+// Per frame: EASU reads the source through a view of the format the caller passes (gfx_window.c present_image: a
+// UNORM view of an sRGB frame on a UNORM swapchain, so the encoded values go through unchanged; else the source's own
+// format, the conversion the blit does) and writes an RGBA16F image of the picture's size on the swapchain (all of it, or the part between black bars,
 // gfx_window.c fit_rect); RCAS reads that and writes a second one; a 1:1 blit converts the result into its place in
 // the swapchain image, which the caller left in TRANSFER_DST. The shaders (runtime/shaders/fsr_*.comp)
 // compute AMD's constants from the push constants. Cost: two compute passes over the swapchain size and one copy per

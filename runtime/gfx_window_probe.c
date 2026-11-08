@@ -1,8 +1,10 @@
-// From fe3h-pc-recomp runtime/gfx_window_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4 only.
+// From fe3h-pc-recomp runtime/gfx_window_probe.c @ 47ef99126793dbd13e4a475feb910a13ef6639b8 (MIT, Copyright (c) 2026 Jeff Aigner), copied with fe3h renamed to mp4; it also presents an sRGB source.
 // From totk-pc-recomp runtime/gfx_window_probe.c @ c944f9f94520874f2a669add30dd08d29ee9f7b5 (MIT, Copyright (c) 2026 Valiantsin Dzerakh), copied with totk renamed to fe3h only.
 // --probe-window: presents 300 frames of a cycling clear colour through vk_present_image, reads the swapchain image back
-// and compares every pixel, measures the vsync rate, flips the focus state with synthetic WM_ACTIVATEAPP messages and
+// and compares every pixel (a UNORM source, then an sRGB one whose bytes must reach the UNORM swapchain unchanged),
+// measures the vsync rate, flips the focus state with synthetic WM_ACTIVATEAPP messages and
 // resizes the window. Run with MP4_VK_VALIDATION=1 to count validation errors.
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -22,6 +24,7 @@ typedef struct {
     VkCommandPool pool;
     VkCommandBuffer cb;
     VkFence fence;
+    VkFormat fmt;
 } Source;
 
 static int fail(const char *what) {
@@ -39,10 +42,11 @@ static void barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImage
     vkCmdPipelineBarrier2(cb, &d);
 }
 
-static int source_create(Source *s) {
+static int source_create(Source *s, VkFormat fmt) {
     VkCtx *c = vk_ctx();
+    s->fmt = fmt;
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-                            .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {SRC_W, SRC_H, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .format = fmt, .extent = {SRC_W, SRC_H, 1}, .mipLevels = 1, .arrayLayers = 1,
                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                             .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
@@ -97,11 +101,26 @@ static int source_clear(Source *s, int first, const float rgba[4]) {
 
 static uint8_t to_byte(float f) { return (uint8_t)(f * 255.0f + 0.5f); }
 
-// Presents one colour and checks every pixel of the readback. Returns 0 when it matches.
+static float srgb_decode(float v) { return v <= 0.04045f ? v / 12.92f : powf((v + 0.055f) / 1.055f, 2.4f); }
+
+static int bytes_close(uint32_t a, uint32_t b, int tol) {
+    for (int k = 0; k < 4; k++) {
+        int d = (int)((a >> (8 * k)) & 255) - (int)((b >> (8 * k)) & 255);
+        if (d > tol || d < -tol) return 0;
+    }
+    return 1;
+}
+
+// Presents one colour and checks every pixel of the readback. Returns 0 when it matches. An sRGB source is cleared to
+// the linear value of the wanted bytes (the clear encodes it); the encode may round one step either way.
 static int present_and_check(Source *s, int first, int i, int *w_out, int *h_out) {
     float rgba[4] = {(float)((i * 7) & 255) / 255.0f, (float)((i * 13) & 255) / 255.0f, (float)((i * 29) & 255) / 255.0f, 1.0f};
-    if (!source_clear(s, first, rgba)) return 1;
-    vk_present_image(s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_FORMAT_R8G8B8A8_UNORM, SRC_W, SRC_H, NULL);
+    int srgb = s->fmt == VK_FORMAT_R8G8B8A8_SRGB;
+    float clear[4] = {rgba[0], rgba[1], rgba[2], rgba[3]};
+    if (srgb)
+        for (int k = 0; k < 3; k++) clear[k] = srgb_decode(rgba[k]);
+    if (!source_clear(s, first, clear)) return 1;
+    vk_present_image(s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s->fmt, SRC_W, SRC_H, NULL);
     const uint8_t *px;
     int w, h;
     VkFormat fmt;
@@ -116,7 +135,7 @@ static int present_and_check(Source *s, int first, int i, int *w_out, int *h_out
     memcpy(&wv, want, 4);
     const uint32_t *p = (const uint32_t *)px;
     for (long k = 0, n = (long)w * h; k < n; k++)
-        if (p[k] != wv) {
+        if (srgb ? !bytes_close(p[k], wv, 1) : p[k] != wv) {
             printf("probe-window: frame %d pixel %ld is %08x, expected %08x\n", i, k, p[k], wv);
             return 4;
         }
@@ -126,17 +145,28 @@ static int present_and_check(Source *s, int first, int i, int *w_out, int *h_out
 }
 
 int probe_window(void) {
+    // the readbacks compare whole images: no performance overlay in its corner, whatever the settings file says (the
+    // environment wins over it, cfg.c cfg_get, and is not saved)
+    _putenv("MP4_PERF_OVERLAY=off");
     gfx_window_start();
     VkCtx *c = vk_ctx();
     if (!c) return fail("no Vulkan device");
     vk_present_capture(1);
     Source s = {0};
-    if (!source_create(&s)) return fail("source image");
+    if (!source_create(&s, VK_FORMAT_R8G8B8A8_UNORM)) return fail("source image");
 
     int w = 0, h = 0;
     for (int i = 0; i < FRAMES; i++)
         if (present_and_check(&s, i == 0, i, &w, &h)) return fail("presented pixels differ");
     printf("probe-window: %d presents, readback %dx%d exact\n", FRAMES, w, h);
+
+    // The game's frames are sRGB images: the swapchain must show their bytes, not their decoded values.
+    Source ss = {0};
+    if (!source_create(&ss, VK_FORMAT_R8G8B8A8_SRGB)) return fail("sRGB source image");
+    for (int i = 0; i < 64; i++)
+        if (present_and_check(&ss, i == 0, i * 4, &w, &h)) return fail("sRGB frame shown decoded");
+    source_destroy(&ss);
+    printf("probe-window: 64 sRGB presents keep the frame's bytes (within 1)\n");
 
     // Focus: synthetic WM_ACTIVATEAPP off and on, delivered synchronously on the window thread.
     unsigned m0 = gfx_window_focus_messages();
