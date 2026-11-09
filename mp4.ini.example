@@ -16,6 +16,9 @@
 # fullscreen = 0
 # Window size, WxH.
 # window_size = 1920x1080
+# Native 4K in docked mode requires output_res = 3840x2160 and render_scale = 100, then a restart.
+# output_res = 1920x1080
+# render_scale = game
 # Vulkan present mode: mailbox (the default), fifo (vsync) or immediate.
 # vk_present = mailbox
 # Which GPU, by index in the Vulkan device list (the best one when unset).
