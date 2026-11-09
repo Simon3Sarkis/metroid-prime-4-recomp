@@ -60,6 +60,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_DESC] = "Size of the 3D scene relative to the game resolution; the game's FSR scales it to "
                                   "that size. Above 100 % smooths jagged edges (supersampling) at a high GPU cost.",
     [UI_MENU_RENDER_SCALE_GAME] = "Game (83 %)",
+    [UI_MENU_ANISOTROPY] = "Anisotropic filtering",
+    [UI_MENU_ANISOTROPY_DESC] = "Sharpens mipmapped world textures at shallow angles. Game uses the original texture filters.",
+    [UI_MENU_ANISOTROPY_GAME] = "Game",
     [UI_MENU_UPSCALER] = "Scaling to the window",
     [UI_MENU_UPSCALER_DESC] = "How the picture is scaled when the window is larger than the game resolution. FSR keeps "
                               "edges and detail sharper than bilinear.",
@@ -295,6 +298,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_DESC] = "Размер 3D-сцены относительно разрешения игры; FSR игры доводит её до этого размера. "
                                   "Выше 100 % сглаживает лесенки на краях (суперсэмплинг) ценой большой нагрузки на GPU.",
     [UI_MENU_RENDER_SCALE_GAME] = "Как в игре (83 %)",
+    [UI_MENU_ANISOTROPY] = "Анизотропная фильтрация",
+    [UI_MENU_ANISOTROPY_DESC] = "Повышает чёткость текстур мира под острым углом. Режим «Как в игре» сохраняет исходную фильтрацию.",
+    [UI_MENU_ANISOTROPY_GAME] = "Как в игре",
     [UI_MENU_UPSCALER] = "Масштабирование под окно",
     [UI_MENU_UPSCALER_DESC] = "Как картинка растягивается, когда окно больше разрешения игры. FSR сохраняет края и "
                               "детали чётче билинейного.",
