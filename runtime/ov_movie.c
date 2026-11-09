@@ -26,10 +26,11 @@
 // MP4_MOVIE_PACE=0 hands every decoded frame over at the next present; MP4_MOVIE_HOST=0 leaves every decoder to the
 // library (which aborts at the first movie).
 // openh264 is loaded at run time, not linked: the installer downloads Cisco's binary (whose H.264 patent licence holds
-// only for that binary, downloaded separately at install time and under the player's control), and the player can turn
-// it off with MP4_OPENH264=0 (mp4.ini [video] openh264 = 0). Without it the game's H.264 decoders become null decoders:
-// the cinematics play their sound over the last picture. The DLL is OPENH264_DLL next to mp4.exe, else MSYS2's
-// libopenh264-8.dll (a development build); the headers are 2.7.0's, the version of both.
+// only for that binary, downloaded separately to the player's machine). The game cannot be played without it: a null
+// decoder in its place starves the game's movie player (it stops feeding input about 27 s into the opening cinematic
+// and waits for frames, a black screen with the music going on, issue #2), so movie_require_codec refuses to start
+// without it. The DLL is OPENH264_DLL next to mp4.exe, else MSYS2's libopenh264-8.dll (a development build); the
+// headers are 2.7.0's, the version of both.
 #include <windows.h>
 #include <emmintrin.h>
 #include <stdint.h>
@@ -132,11 +133,6 @@ static int h264_lib(void) {
     static int state = -1;
     if (state >= 0) return state;
     state = 0;
-    const char *e = cfg_get("MP4_OPENH264");
-    if (e && !strcmp(e, "0")) {
-        rt_log("movie: openh264 turned off (MP4_OPENH264=0): H.264 cinematics show no picture");
-        return 0;
-    }
     wchar_t dir[MAX_PATH], path[MAX_PATH + 64];
     DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
     while (n && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
@@ -150,13 +146,13 @@ static int h264_lib(void) {
         if (h) rt_log("movie: openh264 from %ls%s", names[i], i ? "" : "; OpenH264 Video Codec provided by Cisco Systems, Inc.");
     }
     if (!h) {
-        rt_log("movie: openh264 (%ls) not found next to mp4.exe: H.264 cinematics show no picture", OPENH264_DLL);
+        rt_log("movie: openh264 (%ls) not found next to mp4.exe", OPENH264_DLL);
         return 0;
     }
     p_create = (long (*)(ISVCDecoder **))(void (*)(void))GetProcAddress(h, "WelsCreateDecoder");
     p_destroy = (void (*)(ISVCDecoder *))(void (*)(void))GetProcAddress(h, "WelsDestroyDecoder");
     if (!p_create || !p_destroy) {
-        rt_log("movie: openh264 lacks WelsCreateDecoder/WelsDestroyDecoder: H.264 cinematics show no picture");
+        rt_log("movie: openh264 lacks WelsCreateDecoder/WelsDestroyDecoder");
         return 0;
     }
     return state = 1;
@@ -169,6 +165,27 @@ static int host_off(void) {
         v = e && !strcmp(e, "0");
     }
     return v;
+}
+
+#define OPENH264_URL L"https://ciscobinary.openh264.org/openh264-2.7.0-win64.dll.bz2"
+
+// Before the game starts (runtime/boot.c rt_boot): without openh264 the opening cinematic never ends (see the top of
+// this file), so the game does not start. An interactive start says why in a message box, as the log is not where a
+// player looks; a scripted run (--seconds) only logs and exits.
+void movie_require_codec(int interactive) {
+    if (host_off() || h264_lib()) return;
+    if (interactive)
+        MessageBoxW(NULL,
+                    L"The OpenH264 video codec (" OPENH264_DLL L") is missing from the game folder, and the game's "
+                    L"cinematics cannot play without it.\n\n"
+                    L"Run MP4-Setup again on this folder: it downloads the codec from Cisco.\n\n"
+                    L"Or download it yourself from\n" OPENH264_URL L"\n"
+                    L"unpack the .bz2 file (with 7-Zip, for example; renaming it is not enough) and put "
+                    OPENH264_DLL L" next to mp4.exe.\n\n"
+                    L"OpenH264 Video Codec provided by Cisco Systems, Inc.",
+                    L"Metroid Prime 4 Recomp", MB_OK | MB_ICONERROR);
+    rt_fatal("movie: openh264 (%ls) is needed for the game's cinematics: run the setup again on this folder, or "
+             "unpack %ls next to mp4.exe", OPENH264_DLL, OPENH264_URL);
 }
 
 static uint64_t need(const char *name) {
@@ -603,7 +620,8 @@ static void ov_ctor(Cpu *c) {
         pass(c, MOVIE_CTOR);
         return;
     }
-    int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE && h264_lib();
+    int h264 = type == MOVIE_TYPE_H264 && mode == MOVIE_MODE_TEXTURE;
+    if (h264 && !h264_lib()) rt_fatal("movie: an H.264 decoder without openh264");   // movie_require_codec let it by
     // Audio (type 4, "audio/mp4a-latm" in this game's cinematics) is left to the library: its decoders for AAC and
     // Opus are software (FDK AAC, libopus inside subsdk0) and run lifted; only the video decoders need the NVIDIA
     // driver. MP4_MOVIE_AUDIO=null takes it over as a null decoder instead (the game then shows no video either: its

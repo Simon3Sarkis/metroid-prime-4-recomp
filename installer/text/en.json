@@ -167,7 +167,6 @@
  "lang.zh-Hans": "Chinese (Simplified)",
  "lang.zh-Hant": "Chinese (Traditional)",
  "phase.prepare.openh264": "Downloading the OpenH264 video codec from Cisco",
- "warn.openh264_failed": "The OpenH264 video codec could not be downloaded ({detail}); the game runs, but its cinematics show no picture. Run the setup on this folder again later, or download {url}, unpack it and put {file} next to mp4.exe.",
- "ui.openh264": "Download the OpenH264 video codec from Cisco for the cinematics",
- "ui.openh264_note": "OpenH264 Video Codec provided by Cisco Systems, Inc. Without it the cinematics play their sound over a still picture. It can be turned off later with openh264 = 0 in mp4.ini."
+ "prepare.openh264_failed": "The OpenH264 video codec could not be downloaded from Cisco ({detail}). The game needs it for its cinematics. Run the setup again later, or download {url} yourself, put it (as it is, or unpacked to {file}) into {dest} and run the setup again: it continues where it stopped.",
+ "ui.openh264_note": "The setup downloads the OpenH264 video codec from Cisco, which the game needs for its cinematics. OpenH264 Video Codec provided by Cisco Systems, Inc."
 }

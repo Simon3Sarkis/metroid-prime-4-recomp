@@ -111,7 +111,6 @@ class Form:
     keys: str = ''
     lang: str = ''
     dest: str = ''
-    openh264: bool = True   # MP4: download Cisco's OpenH264 codec for the cinematics (installer/steps.py Prepare)
 
     def installed_state(self):
         """The recorded state of the install folder (mp4-install.json), or None. Never raises."""
@@ -160,7 +159,6 @@ class Form:
             cmd += ['--temp', str(temp)]
         if verify:
             cmd.append('--verify')
-        cmd += ['--openh264', 'yes' if self.openh264 else 'no']
         return cmd
 
 

@@ -54,7 +54,6 @@ class App:
         self.bound = []                  # (widget, option, id, params) retranslated on a language switch
         self.vars = {n: tk.StringVar() for n in ('base', 'update', 'keys', 'dest')}
         self.vars['lang'] = tk.StringVar()
-        self.openh264 = tk.BooleanVar(value=True)   # MP4: Cisco's OpenH264 codec (installer/steps.py Prepare)
         self.lang_code = default_game_language(ui_lang)
         self.screen = None
         self.fitted = None               # the (width, height) fit last gave the window
@@ -202,11 +201,9 @@ class App:
         self.label(grid, 'ui.dest').grid(row=i + 1, column=0, sticky='w', pady=4)
         ttk.Entry(grid, textvariable=self.vars['dest']).grid(row=i + 1, column=1, sticky='ew', pady=4)
         self.button(grid, 'ui.browse', self.pick_dest).grid(row=i + 1, column=2, padx=(8, 0))
-        # MP4: the player decides whether Cisco's binary is downloaded; its licence asks for the attribution line.
-        codec = ttk.Checkbutton(f, variable=self.openh264)
-        self.bind_text(codec, 'text', 'ui.openh264')
-        codec.pack(anchor='w', pady=(8, 0))
-        self.label(f, 'ui.openh264_note', wraplength=620, justify='left').pack(anchor='w', padx=(24, 0))
+        # MP4: the setup downloads Cisco's OpenH264 binary, which the game needs (installer/steps.py Prepare); its
+        # licence asks for the attribution line.
+        self.label(f, 'ui.openh264_note', wraplength=620, justify='left').pack(anchor='w', pady=(8, 0))
         self.update_hint = ttk.Label(f, wraplength=620, justify='left')
         self.update_hint.pack(anchor='w', pady=(8, 0))
         self.form_error = ttk.Label(f, style='Err.TLabel', wraplength=620, justify='left')
@@ -267,7 +264,7 @@ class App:
 
     def form(self):
         return Form(base=self.vars['base'].get(), update=self.vars['update'].get(), keys=self.vars['keys'].get(),
-                    lang=self.selected_lang(), dest=self.vars['dest'].get(), openh264=self.openh264.get())
+                    lang=self.selected_lang(), dest=self.vars['dest'].get())
 
     def refresh_form(self):
         form = self.form()

@@ -48,8 +48,10 @@ The setup builds the game on your machine from your own files; nothing from the 
 1. Download `MP4-Setup-<version>-windows.zip` from the GitHub Releases page, unpack it anywhere and start
    `MP4-Setup.exe` (Windows warns about an unsigned program the first time).
 2. Pick the base game (XCI or NSP), the 1.1.0 update (NSP), your `prod.keys`, the game language and an install
-   folder. Leave "Download the OpenH264 video codec" ticked to see the cinematics: the setup then downloads Cisco's
-   codec from Cisco. OpenH264 Video Codec provided by Cisco Systems, Inc.
+   folder. The setup downloads the OpenH264 video codec from Cisco, which the game needs. If that download fails, get
+   https://ciscobinary.openh264.org/openh264-2.7.0-win64.dll.bz2 yourself, put it in the install folder (as it is, or
+   unpacked with 7-Zip; renaming it is not enough) and run the setup again. OpenH264 Video Codec provided by Cisco
+   Systems, Inc.
 3. Wait: about 8 minutes on a fast SSD, 2 of them preparing the shaders. The install folder needs about 61 GB free during the setup and 35 GB after it.
 4. Start `mp4.exe` in the install folder. The setup folder and your game files are no longer needed.
 

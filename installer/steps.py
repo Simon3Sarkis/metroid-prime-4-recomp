@@ -587,23 +587,42 @@ class Compile(Step):
 TRANSLATED = re.compile(r'gfx_shader: prepare: (\d+) of (\d+) pairs')
 
 # The cinematics are H.264, decoded by openh264 (runtime/ov_movie.c h264_lib, which loads OPENH264_DLL next to
-# mp4.exe). Cisco's H.264 patent licence covers its own binary only when that binary is downloaded separately at install
-# time and the user controls its use, so the release carries no openh264 binary: this step downloads Cisco's from
-# Cisco, checks it against the pinned hash and unpacks it, unless the player said no (--openh264 no, the window's
-# checkbox), in which case it removes one left from before. A failed download is a warning: the game runs, and the
-# cinematics show no picture. Cisco's licence text is in THIRD_PARTY_NOTICES.md.
+# mp4.exe). Cisco's H.264 patent licence covers its own binary only when that binary is downloaded separately to the
+# player's machine, so the release carries no openh264 binary: this step downloads Cisco's from Cisco, checks it against
+# the pinned hash and unpacks it. The game cannot be played without it (the opening cinematic never ends: issue #2, and
+# mp4.exe refuses to start, runtime/ov_movie.c movie_require_codec), so a failed download fails the step, before the
+# shaders, and the next run of the setup retries. Cisco's licence text is in THIRD_PARTY_NOTICES.md.
 OPENH264_DLL = 'openh264-2.7.0-win64.dll'
 OPENH264_URL = 'https://ciscobinary.openh264.org/openh264-2.7.0-win64.dll.bz2'
 OPENH264_BZ2_SHA256 = '7073fda55e904ac515f787d9728c4bcf9965ec7c91c9f84eae3f260ef9b9b37c'
 OPENH264_SHA256 = '0ef5e7f3b38753b15c13afa0418d4d7805fa228e6adfd3e425bbf758cff1c288'   # Cisco's .signed.sha256.txt
 
 
-def openh264_wanted(ctx):
-    """The player's choice: --openh264, else the recorded one, else yes. Recorded for the next update."""
-    choice = getattr(ctx.options, 'openh264', None)
-    wanted = choice == 'yes' if choice else ctx.state.get('openh264', True)
-    ctx.state['openh264'] = wanted
-    return wanted
+def local_openh264(ctx, dest):
+    """Take a copy the player downloaded themselves (the download failed, or they would rather fetch it in a browser):
+    the .dll or Cisco's .bz2, in the game folder or the setup's own folder, accepted only with Cisco's hash. True when
+    dest now holds it."""
+    import bz2
+    for folder in dict.fromkeys((dest.parent, ctx.layout.root)):
+        for name in (OPENH264_DLL, OPENH264_DLL + '.bz2'):
+            src = folder / name
+            if not src.is_file() or src == dest:
+                continue
+            try:
+                data = src.read_bytes()
+                if name.endswith('.bz2'):
+                    if hashlib.sha256(data).hexdigest() != OPENH264_BZ2_SHA256:
+                        continue
+                    data = bz2.decompress(data)
+            except (OSError, ValueError, EOFError):
+                continue
+            if hashlib.sha256(data).hexdigest() == OPENH264_SHA256:
+                tmp = dest.with_name(dest.name + '.tmp')
+                tmp.write_bytes(data)
+                os.replace(tmp, dest)
+                ctx.reporter.log(f'openh264: taken from {src}')
+                return True
+    return False
 
 
 def fetch_openh264(ctx, dest):
@@ -664,20 +683,29 @@ class Prepare(Step):
         layout = ctx.layout
         tools = [layout.tools / n for n in ('prepare_shaders.py', 'shader_inventory.py', 'pack_shader_cache.py')]
         return fingerprint('prepare-mp4-4', ctx.keys['compile'], layout.xlate, layout.xlate.with_suffix('.id'),
-                           OPENH264_SHA256, 'openh264' if openh264_wanted(ctx) else 'no openh264',
+                           OPENH264_SHA256,
                            *([layout.shader_list] if layout.shader_list else []),
                            *([layout.pipeline_list] if layout.pipeline_list else []), *tools)
 
     def current(self, ctx, record):
         xlate = ctx.dest / ctx.layout.xlate.name
         codec = ctx.dest / OPENH264_DLL
-        codec_ok = (codec.is_file() and file_sha256(codec) == OPENH264_SHA256) if openh264_wanted(ctx) \
-            else not codec.exists()
+        codec_ok = codec.is_file() and file_sha256(codec) == OPENH264_SHA256
         prepared = not ctx.layout.shader_list or (ctx.dest / 'shader-prepared.bin').is_file()
         return xlate.is_file() and file_sha256(xlate) == record.get('xlate_sha256') and codec_ok and prepared
 
     def run(self, ctx):
         layout, rep, dest = ctx.layout, ctx.reporter, ctx.dest
+        codec = dest / OPENH264_DLL
+        notice = dest / 'openh264-BINARY_LICENSE.txt'   # Cisco's licence, next to the binary it covers
+        replace_file(Path(__file__).resolve().parent / 'text' / notice.name, notice)
+        if not (codec.is_file() and file_sha256(codec) == OPENH264_SHA256) and not local_openh264(ctx, codec):
+            rep.progress('prepare', 'openh264', force=True)
+            problem = fetch_openh264(ctx, codec)
+            if problem:
+                rep.log(f'openh264: {problem}')
+                raise InstallError('prepare.openh264_failed', detail=problem, url=OPENH264_URL, file=OPENH264_DLL,
+                                   dest=str(dest))
         rep.progress('prepare', 'translator', force=True)
         xlate = dest / layout.xlate.name
         if xlate.is_file() and file_sha256(xlate) != file_sha256(layout.xlate):
@@ -694,19 +722,6 @@ class Prepare(Step):
             prepare_shaders(ctx, dest)
         else:
             rep.log('prepare: no shader list (a dev checkout without build/shader-list.bin): shaders are translated in play')
-        codec = dest / OPENH264_DLL
-        notice = dest / 'openh264-BINARY_LICENSE.txt'   # Cisco's licence, next to the binary it covers
-        if openh264_wanted(ctx):
-            replace_file(Path(__file__).resolve().parent / 'text' / notice.name, notice)
-            if not (codec.is_file() and file_sha256(codec) == OPENH264_SHA256):
-                rep.progress('prepare', 'openh264', force=True)
-                problem = fetch_openh264(ctx, codec)
-                if problem:
-                    rep.log(f'openh264: {problem}')
-                    rep.warning('warn.openh264_failed', detail=problem, url=OPENH264_URL, file=OPENH264_DLL)
-        else:
-            remove(codec)
-            remove(notice)
         return {'xlate_sha256': file_sha256(xlate)}
 
 

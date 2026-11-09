@@ -473,6 +473,7 @@ static DWORD WINAPI prewarm_main(void *arg) {
 
 void rt_boot(void) {
     check_npdm();
+    movie_require_codec(!rt_config()->boot);   // ov_movie.c: a player's start (no --boot/--seconds) gets a message box
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
     HANDLE warm = CreateThread(NULL, 0, prewarm_main, NULL, 0, NULL);

@@ -32,12 +32,6 @@
 # Volume, 0 to 100.
 # volume = 100
 
-[video]
-# The cinematics' H.264 decoder, OpenH264 (openh264-2.7.0-win64.dll next to mp4.exe, downloaded from Cisco by the
-# setup): 1 uses it, 0 does not (the cinematics then play their sound over a still picture).
-# OpenH264 Video Codec provided by Cisco Systems, Inc.
-# openh264 = 1
-
 [input]
 # Button prompts and layout: auto (from the controller), nintendo or xbox.
 # pad_layout = auto

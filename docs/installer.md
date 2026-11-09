@@ -24,7 +24,7 @@ The install folder (`main.c` `portable_paths()` reads this layout; it stays port
 ```
 <install folder>/
   mp4.exe, SDL3.dll, libopus-0.dll, mp4_xlate.exe
-  openh264-2.7.0-win64.dll       Cisco's OpenH264 binary, downloaded from Cisco by the setup (unless the player says no),
+  openh264-2.7.0-win64.dll       Cisco's OpenH264 binary, downloaded from Cisco by the setup (required),
   openh264-BINARY_LICENSE.txt    with Cisco's licence for it
   mp4.ini                       language; the other keys as commented defaults (mp4.ini.example)
   exefs/, romfs/                 extracted from the player's files
@@ -58,7 +58,7 @@ release that changes nothing game-derived skips the rebuild.
    release's list names (`tools/prepare_shaders.py`: find each in the player's RomFS, `mp4.exe --prepare-shaders`
    translates them and builds them into the driver's cache, about 2 minutes for 35,000 variants on 12 cores) and pack
    the cache into one file (`tools/pack_shader_cache.py`). Shaders the list lacks are translated as they are met in
-   play. Download Cisco's OpenH264 binary for the cinematics, unless the player said no (see "Release layout").
+   play. First of all, Cisco's OpenH264 binary, which the game needs (see "Release layout").
 6. **Clean up** the temp folder (generated C and objects).
 
 A cancelled or failed setup resumes from the last finished step (`mp4-install.json`).
@@ -69,7 +69,6 @@ A cancelled or failed setup resumes from the last finished step (`mp4-install.js
 
 ```
 python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--root DIR] [--temp DIR] [--verify]
-                    [--openh264 yes|no]
 ```
 
 - On a folder with `mp4-install.json` only `--dest` is needed; the game files only when the extraction must run again.
@@ -114,12 +113,15 @@ mp4.ini.example, VERSION  the default ini; the release string (the repository's 
 
 - SDL3 comes from the upstream release, not MSYS2: MSYS2's DLL imports the LGPL libiconv.
 - openh264, the cinematics' H.264 decoder: Cisco's H.264 patent licence covers Cisco's own binary only when it is
-  downloaded separately to the player's machine and the player controls its use. So the release carries only
-  openh264's headers; the Prepare step downloads Cisco's `openh264-2.7.0-win64.dll` from ciscobinary.openh264.org,
-  checks it against Cisco's published SHA-256 and puts it, with `openh264-BINARY_LICENSE.txt`, next to `mp4.exe`. The
-  window's checkbox (shown with "OpenH264 Video Codec provided by Cisco Systems, Inc.") and `--openh264 yes|no` decide
-  whether it does; `openh264 = 0` in mp4.ini turns it off later. Without it the game runs and the cinematics show no
-  picture (`runtime/ov_movie.c` h264_lib). A failed download is a warning, and the next run of the setup retries.
+  downloaded separately to the player's machine. So the release carries only openh264's headers; the Prepare step,
+  before the shaders, downloads Cisco's `openh264-2.7.0-win64.dll` from ciscobinary.openh264.org, checks it against
+  Cisco's published SHA-256 and puts it, with `openh264-BINARY_LICENSE.txt`, next to `mp4.exe`. The window shows
+  "OpenH264 Video Codec provided by Cisco Systems, Inc." There is no opt-out: without the codec the opening cinematic
+  never ends (the game's movie player stops feeding a decoder that returns no frames and waits, a black screen with
+  music, issue #2), so `mp4.exe` refuses to start without it, with a message box saying how to get it
+  (`runtime/ov_movie.c` movie_require_codec). A failed download fails the step. A player who fetches the file
+  themselves puts Cisco's `.bz2` or the unpacked `.dll` in the install folder (or the setup folder) and runs the setup
+  again: Prepare takes a copy with Cisco's hash (`installer/steps.py` local_openh264) and the setup goes on from there.
 - Every bundled third-party piece gets a row in `THIRD_PARTY_NOTICES.md`.
 - The release contains nothing game-derived; `make_release.py` runs `tools/check_content.py` over the folder before it
   finishes.
